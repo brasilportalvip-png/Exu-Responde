@@ -18,7 +18,9 @@ const PORT = 3000;
 app.use(express.json());
 
 // In-Memory & Local persistent file DB path
-const DB_FILE = path.join(process.cwd(), "db.json");
+const DB_FILE = process.env.VERCEL
+  ? path.join("/tmp", "db.json")
+  : path.join(process.cwd(), "db.json");
 
 // Helper to lazy-initialize the Gemini client
 let geminiClientCache: GoogleGenAI | null = null;
@@ -97,6 +99,17 @@ const DEFAULT_KNOWLEDGE: any[] = [
 
 // Load or Initialize database
 function loadDb(): any {
+  if (process.env.VERCEL && !fs.existsSync(DB_FILE)) {
+    const bundledDbPath = path.join(process.cwd(), "db.json");
+    if (fs.existsSync(bundledDbPath)) {
+      try {
+        fs.copyFileSync(bundledDbPath, DB_FILE);
+      } catch (err) {
+        console.error("Error copying db.json to /tmp:", err);
+      }
+    }
+  }
+
   if (fs.existsSync(DB_FILE)) {
     try {
       return JSON.parse(fs.readFileSync(DB_FILE, "utf-8"));
@@ -1231,4 +1244,8 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
