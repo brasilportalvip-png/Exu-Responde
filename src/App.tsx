@@ -321,7 +321,7 @@ export default function App() {
       `}</style>
 
       {/* FUNDO DA VINHETA  */}
-      <div id="portal_espiritual" className="absolute inset-0 z-0 overflow-hidden pointer-events-none select-none">
+      <div id="portal_espiritual" className="absolute inset-0 z-0 overflow-hidden pointer-events-none select-none bg-gradient-to-tr from-zinc-950 via-zinc-950/90 to-red-950/30">
         <video
           id="vinhete_video"
           src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
@@ -754,7 +754,7 @@ export default function App() {
             exit={{ opacity: 0 }}
             className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex items-center justify-center p-4 overflow-y-auto"
           >
-            <div className="absolute inset-0 select-none pointer-events-none opacity-40">
+            <div className="absolute inset-0 select-none pointer-events-none opacity-40 bg-[radial-gradient(circle_at_center,rgba(115,10,10,0.4)_0%,transparent_100%)]">
               <video
                 src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
                 className="w-full h-full object-cover filter brightness-[0.2]"

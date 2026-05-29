@@ -19,6 +19,19 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const videoRef = React.useRef<HTMLVideoElement>(null);
+
+  // Sync mute/play status without reloading video element
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.muted = !soundEnabled;
+      if (soundEnabled) {
+        videoRef.current.play().catch((err) => {
+          console.warn("Autoplay unmute play retry:", err);
+        });
+      }
+    }
+  }, [soundEnabled]);
 
   // Form states
   const [birthName, setBirthName] = useState("");
@@ -195,10 +208,10 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
     <div id="portal_view" className="relative w-full min-h-[90vh] lg:min-h-0 bg-black lg:bg-zinc-950/95 border-0 lg:border lg:border-yellow-500/20 rounded-none lg:rounded-3xl overflow-hidden flex flex-col items-center justify-center font-sans px-4 sm:px-10 py-10 select-none shadow-none lg:shadow-[0_25px_60px_rgba(0,0,0,0.95)]">
       
       {/* Immersive Full Screen Background Video */}
-      <div className="absolute inset-0 z-0 overflow-hidden select-none pointer-events-none">
+      <div className="absolute inset-0 z-0 overflow-hidden select-none pointer-events-none bg-zinc-950 bg-[radial-gradient(circle_at_center,rgba(115,10,10,0.45)_0%,rgba(0,0,0,1)_100%)] animate-pulse duration-[10000ms]">
         <video
+          ref={videoRef}
           id="main_portal_bg_video"
-          key={`portal_vignette_sound_${soundEnabled}`}
           src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
           className="w-full h-full object-cover filter brightness-[0.5] contrast-[1.12]"
           autoPlay
