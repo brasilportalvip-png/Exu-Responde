@@ -1,0 +1,8 @@
+{
+  "name": "Exu Responde",
+  "description": "Uma experiência cinematográfica e espiritual de inteligência ancestral baseada em Ifá, numerologia, tarot e oráculos, oferecendo conselhos estratégicos profundos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
