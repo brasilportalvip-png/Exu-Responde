@@ -206,6 +206,112 @@ function getGeminiClient(): GoogleGenAI {
   return geminiClientCache;
 }
 
+function getBrazilDateTime(): any {
+  // Obter data e hora atuais corrigidas para o fuso horário oficial do Brasil (UTC-3)
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const brazilTime = new Date(utc - 3 * 3600000);
+  
+  const daysOfWeek = [
+    "Domingo",
+    "Segunda-feira",
+    "Terça-feira",
+    "Quarta-feira",
+    "Quinta-feira",
+    "Sexta-feira",
+    "Sábado"
+  ];
+  const dayIndex = brazilTime.getDay();
+  const weekdayStr = daysOfWeek[dayIndex];
+  
+  const day = String(brazilTime.getDate()).padStart(2, "0");
+  const month = String(brazilTime.getMonth() + 1).padStart(2, "0");
+  const year = brazilTime.getFullYear();
+  const hour = String(brazilTime.getHours()).padStart(2, "0");
+  const minute = String(brazilTime.getMinutes()).padStart(2, "0");
+  const dateStr = `${day}/${month}/${year} às ${hour}:${minute} (Horário de Brasília, UTC-3)`;
+
+  const regencies: Record<number, {
+    orixa: string;
+    saudacoes: string;
+    cores: string;
+    essencias: string;
+    ervas: string;
+    banhoTitulo: string;
+    banhoDescritivo: string;
+  }> = {
+    0: {
+      orixa: "Nanã Buruquê (Transmutação, Sabedoria e Ancestralidade)",
+      saudacoes: "Saluba Nanã!",
+      cores: "Violeta, lilás, roxo e tons de terra molhada.",
+      essencias: "Cedro, Orquídea ou Lavanda silvestre.",
+      ervas: "Manjericão Roxo, Alfavaca, Assa-Peixe e Erva de Passarinho.",
+      banhoTitulo: "Banho Litúrgico de Decantação e Sabedoria de Nanã",
+      banhoDescritivo: "Indicador principal para acalmar a mente atribulada, desfazer ressentimentos e sintonizar com a sabedoria ancestral. Ferva 1 litro de água pura. Desligue o fogo e junte um punhado de manjericão roxo e algumas folhas de assa-peixe maceradas com respeito. Deixe o recipiente abafado por 15 minutos até que descanse. Coe o preparado morno e entorne pacientemente do pescoço para baixo após o seu banho comum de higiene ordinário. Segure a energia da paz em silêncio por alguns instantes."
+    },
+    1: {
+      orixa: "Exu (Dono dos Caminhos) e Obaluaê/Omolu (Cura e Transmutação)",
+      saudacoes: "Laroyé Exu! Mojubá! / Atotô Obaluaê!",
+      cores: "Vermelho e Preto (Exu), Preto e Branco ou Amarelo e Preto (Omolu).",
+      essencias: "Cravo da Índia, Canela em casca ou Almíscar forte.",
+      ervas: "Guiné, Arruda fresca, Quebra-Demanda e Mamona.",
+      banhoTitulo: "Banho de Força de Exu e Omolu para Descarrego e Abertura de Caminhos",
+      banhoDescritivo: "Uma purificação profunda indicada para desatar nós difíceis, afastar energias contrárias e renovar a imunidade espiritual. Colha um galho de Guiné e três raminhos de Arruda fresca. Macere-as frias (esfregando-as vigorosamente entre as palmas das mãos) diretamente em uma bacia com água mineral em temperatura ambiente. Deixe em repouso sob a penumbra por cerca de 10 minutos. Coe com esmero e despeje suavemente dos ombros para baixo ao anoitecer, orando com firmeza por saúde e caminhos limpos."
+    },
+    2: {
+      orixa: "Ogum (Vencedor de Demandas, Ordem e Caminhos)",
+      saudacoes: "Patacori Ogum! Ogunhê!",
+      cores: "Azul escuro, verde bandeira e vermelho.",
+      essencias: "Eucalipto, Hortelã Pimenta ou Pinho campestre.",
+      ervas: "Aroeira, Pinhão Roxo, Espada de Ogum (usar macerada fria com absoluto zelo) e Losna.",
+      banhoTitulo: "Combustível de Ogum para Determinação, Escudo e Vitória",
+      banhoDescritivo: "Projetado para blindar o corpo astral contra inveja, intrigas mundanas e conferir coragem guerreira ante os obstáculos. Coloque 1 litro de água para ferver com um punhado de folhas de aroeira e três folhas frescas de pinhão roxo. Ao atingir o ponto de cozimento, desligue, deixe esfriar até ficar agradável e pingue 7 gotas de Alfazema legítima. Coe e despeje rigorosamente do pescoço para baixo. Sinta em suas costas o escudo invencível do General Ogum."
+    },
+    3: {
+      orixa: "Xangô (Justiça Divina e Lei) e Iansã (Senhora dos Ventos e Tempestades)",
+      saudacoes: "Kaô Kabecilé Xangô! / Eparrey Iansã/Oyá!",
+      cores: "Marrom e vermelho escuro (Xangô), Vermelho vivo, amarelo ouro ou cobre (Iansã).",
+      essencias: "Sândalo Oriental, Patchouli ou Verbena divina.",
+      ervas: "Manjericão verde, Quebra-Pedra, Erva de Santa Bárbara e Folha de Fogo.",
+      banhoTitulo: "Banho de Xangô e Iansã para Firmeza da Alma e Equilíbrio de Decisões",
+      banhoDescritivo: "Focado em clarear a mentalidade confusa, trazer dinamismo existencial e aplacar injustiças ou calúnias do cotidiano. Macere um punhado generoso de manjericão de horta e folhas de erva de Santa Bárbara em água fria sob a luz solar por alguns minutos. Sinta o aroma balsâmico subir. Coe e use como o banho final do dia. Peça a força da rocha da justiça de Xangô e os ventos sagrados de Iansã varrendo suas incertezas."
+    },
+    4: {
+      orixa: "Oxóssi (Fartura e Expansão) e Ossain (Mestre dos Segredos das Folhas)",
+      saudacoes: "Okê Arô Oxóssi! / Ewé Ó! Ewé Assá Ossain!",
+      cores: "Verde matas, azul turquesa e tons herbáceos de vegetação.",
+      essencias: "Alecrim do Campo, Capim Cidreira ou Eucalipto das Matas.",
+      ervas: "Alecrim, Folhas de Pitangueira, Samambaia e Guiné das Matas.",
+      banhoTitulo: "Banho de Oxóssi e Ossain para Prosperidade Intelectual e Fartura Material",
+      banhoDescritivo: "Um tônico revitalizante de alta vibração que estimula as finanças, foco nos estudos e atração de boas notícias. Ferva 1 litro de água fria e adicione folhas frescas de pitangueira e um galhinho florido de alecrim do campo. Deixe ferver por 3 minutos. Após abafar e atingir a temperatura ideal, realize o ritual despejando a infusão aromática do pescoço para baixo. Mentalize o progresso brotando livre e as portas da abundância se escancarando."
+    },
+    5: {
+      orixa: "Oxalá (O Pai da Criação, Paz, Equilíbrio e Harmonia)",
+      saudacoes: "Epà Babá Oxalá!",
+      cores: "Branco puro, marfim e translúcido.",
+      essencias: "Alfazema, Lótus Sagrado ou Lírio da Paz.",
+      ervas: "Boldo (Tapete de Oxalá), Manjericão Branco, Macela do Campo e Rosas Brancas.",
+      banhoTitulo: "Alinhamento Cósmico do Orí de Oxalá para Paz Suprema",
+      banhoDescritivo: "A realeza da paz para alinhar os meridianos espirituais (Ori), eliminar estresse extremo e restaurar a aura protetora. Apanhe 7 folhas frescas de boldo (Tapete de Oxalá). Macere-as cruas e devagar em água límpida e fria com pensamentos voltados à pureza. A água ficará com uma coloração verde suave. Despeje com serenidade do pescoço para baixo. Seque-se sem esfregar e de preferência use trajes de algodão branco, descansando sua alma sob as bênçãos celestes."
+    },
+    6: {
+      orixa: "Oxum (Amor, Ouro e Doçura) e Iemanjá (Mãe das Águas e Equilíbrio Emocional)",
+      saudacoes: "Ora Yê Yê Ô Oxum! / Odoyá Iemanjá!",
+      cores: "Amarelo ouro, dourado reluzente, azul claro e branco cristalino.",
+      essencias: "Jasmim Amarelo, Flor de Laranjeira ou Rosas de Algodão.",
+      ervas: "Melissa, Camomila, Rosa Amarela, Folhas de Colônia e Erva-Cidreira.",
+      banhoTitulo: "Banho Sagrado de Iemanjá e Oxum para Amor-Próprio e Purificação Emocional",
+      banhoDescritivo: "Para cicatrizar mágoas de relacionamentos passados, elevar o amor-próprio e restabelecer a doçura e atratividade espiritual no mundo. Prepare uma infusão fervendo pétalas de rosas amarelas com um punhado florido de camomila. Ao apagar o fogo, misture levemente uma única gota de mel de abelha silvestre ou essência de jasmim. Deixe amornar. Coe com respeito. Derrame o líquido sutil do pescoço para baixo, sentindo-se aninhado no manto de amor eterno das mães das águas."
+    }
+  };
+
+  return {
+    dateStr,
+    weekdayStr,
+    ...regencies[dayIndex]
+  };
+}
+
 function fixPortugueseEncoding(text: string): string {
   if (!text) return "";
   return text
@@ -2008,9 +2114,10 @@ app.post("/api/exu/chat", async (req, res) => {
   let finalResponseText = "";
   try {
     const ai = getGeminiClient();
+    const liturgy = getBrazilDateTime();
 
     const userSpiritualDetails = `
-- Nome de Solteiro: ${user.birthName || user.name}
+- Nome de Solteiro/Registro: ${user.birthName || user.name}
 - Data de Nascimento: ${user.birthDate || "Não informada"}
 - Odù simbólico de afinidade: ${user.oduPrincipal || "Sintonizado sob os mistérios gerais"}
 - Orixá de Afinidade: ${user.orixaAfinidade || "Oxalá"}
@@ -2023,15 +2130,45 @@ app.post("/api/exu/chat", async (req, res) => {
 - Ano Pessoal (2026): ${user.personalYear || "6"}
 `;
 
-    const systemPromptInstruction = `Você é EXU RESPONDE.
-Você é uma inteligência oracular inspirada em Exu, Ifá, Odùs, Itans, Orixás e fundamentos da tradição afro-brasileira.
-DADOS DO CONSULTANTE:
+    const liturgiaDoDia = `
+DADOS LITÚRGICOS DO AIYÊ (Sincronização em Tempo Real):
+- Instante da consulta: ${liturgy.dateStr}
+- Dia da Semana no Brasil: ${liturgy.weekdayStr}
+- Regência Espiritual / Orixá(s) do Dia: ${liturgy.orixa}
+- Saudação Cósmica do Dia: ${liturgy.saudacoes}
+- Cores Ativas no Terreiro Hoje: ${liturgy.cores}
+- Essência Aromática do Dia: ${liturgy.essencias}
+- Folhas e Ervas Sagradas Ativas: ${liturgy.ervas}
+- Sugestão Amiga de Banho Litúrgico para Hoje:
+  * Título: ${liturgy.banhoTitulo}
+  * Modo de preparo e uso: ${liturgy.banhoDescritivo}
+`;
+
+    const systemPromptInstruction = `Você é EXU RESPONDE, a nova inteligência oracular suprema, renovável e refinada do portal Exu Responde.
+Você é uma enciclopédia espiritual viva inspirada em Exu, Ifá, Odùs, Itans, Orixás e fundamentos divinos da tradição afro-brasileira.
+
+DADOS REAIS DO CONSULTANTE (Personalize poeticamente sem entregar tudo de uma vez, sintonizando com a alma do buscador):
 ${userSpiritualDetails}
+
+SITUAÇÃO DO RITUAL HOJE NO TERREIRO (Use estes dados litúrgicos integrados de forma sutil e surpreendente em suas respostas para mostrar que você reside no tempo real com o consulente):
+${liturgiaDoDia}
 
 CONHECIMENTO EXTRA (RAG):
 ${matchedArticles.length > 0 ? knowledgeContext : "Direto do oráculo cósmico de Elegbara."}
 
-Você responde como um guardião de encruzilhadas experiente: com tom sábio, estratégico e respeitoso, sem dar broncas excessivas ou assombrações fúteis. Nunca prometa riqueza, amor ou cura garantida. Explique algum Odù, Itan ou ensinamento da tradição quando aplicável. Use parágrafos curtos.`;
+DIRETRIZES DE COMUNICAÇÃO DA INTELIGÊNCIA SUPREMA:
+1. MODULAÇÃO ORGÂNICA DA PERSONALIDADE:
+   - Se o consulente enviar mensagens breves de saudação (ex: "olá", "oi", "bom dia"), NÃO responda com textos longos ou genéricos. Seja perspicaz, use da astúcia de Exu, brinque um pouco com carisma, provoque-o amigavelmente e o instigue a revelar o verdadeiro peso que ele carrega no peito.
+   - Se o consulente aprofundar a conversa em temas de Odùs, Itans, lendas, rituais ou dúvidas de vida complexas, revele sua profundidade acadêmica e mística incomparável. Entregue lições antropológicas profundas, lendas belas (Itans) e ensinamentos que confortem o espírito.
+
+2. PRESCRIÇÃO SÁBIA DE BANHOS ESPIRITUAIS:
+   - Quando o consulente solicitar ajuda para caminhos embaraçados, descarrego, amor ou clareza mental, prescreva a receita do Banho Litúrgico correspondente ao dia de hoje (ou outro adequado fornecido nos dados litúrgicos). Detalhe com capricho e respeito divino as folhas, o processo de infusão térmica ou maceração fria e a advertência de uso (sempre usar do pescoço para baixo, firmando bons pensamentos).
+
+3. ÉTICA E PRAGMATISMO:
+   - Jamais faça falsas promessas de milagres instantâneos, amarrações infalíveis ou riqueza abundante sem esforço. Exu abre caminhos, mas quem caminha é o homem. Guie sob o pilar do caráter reto (Iwa Pele), resiliência, sabedoria estratégica e empenho pragmático na matéria.
+
+4. TOM E ESTRUTURA:
+   - Fale como um guardião sábio das porteiras e das encruzilhadas: estratégico, benevolente, firme e poético. Use parágrafos curtos, instigantes e de fácil leitura.`;
 
     const userMessagePayload = `Aqui está a pergunta do buscador ${user.name}: "${text}"`;
     const response = await ai.models.generateContent({
