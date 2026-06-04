@@ -8,7 +8,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { 
   Sparkles, Compass, LogIn, LogOut, Flame, Volume2, VolumeX, Send, 
   BookOpen, User, Coins, Award, ShieldCheck, Terminal, HelpCircle, 
-  RotateCcw, Trash2, Bookmark, Star, ChevronDown, CheckCircle
+  RotateCcw, Trash2, Bookmark, Star, ChevronDown, CheckCircle, MessageSquare
 } from "lucide-react";
 import { AudioEngine } from "./components/AudioEngine";
 import { UserProfile, ChatMessage } from "./types";
@@ -400,6 +400,19 @@ export default function App() {
 
         {/* BOTAO LOGIN / USER PROFILE HUB */}
         <div className="flex items-center gap-2 sm:gap-4.5">
+          {/* GRUPO SUPORTE WHATSAPP */}
+          <a
+            id="link_suporte_whatsapp"
+            href="https://chat.whatsapp.com/Lo8Tu80EZArLcZAHF5YfIu?s=sh&p=a&mlu=3&amv=1"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => AudioEngine.playCrystalBell()}
+            className="flex items-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 rounded-full border border-emerald-500/30 bg-emerald-950/20 hover:bg-emerald-500 hover:text-black text-emerald-400 hover:border-emerald-400 transition-all text-[11px] font-bold font-mono tracking-wider shadow-[0_0_10px_rgba(16,185,129,0.15)] cursor-pointer"
+          >
+            <MessageSquare className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">SUPORTE VIP</span>
+            <span className="sm:hidden">SUPORTE</span>
+          </a>
           {user && (
             <>
               {/* Wallet indicator */}
@@ -742,6 +755,27 @@ export default function App() {
         </div>
 
       </section>
+
+      {/* FLOATING WHATSAPP VIP SUPPORT BUTTON */}
+      <div className="fixed bottom-4 right-4 z-35 flex flex-col items-end gap-2 pointer-events-auto select-none">
+        <a
+          id="floating_suporte_whatsapp"
+          href="https://chat.whatsapp.com/Lo8Tu80EZArLcZAHF5YfIu?s=sh&p=a&mlu=3&amv=1"
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={() => AudioEngine.playCrystalBell()}
+          className="group relative flex items-center gap-2 px-4 py-2.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold font-sans text-xs tracking-wide shadow-[0_10px_25px_rgba(16,185,129,0.4)] hover:shadow-[0_15px_30px_rgba(16,185,129,0.55)] border border-emerald-400/20 transition-all duration-300 transform hover:-translate-y-1 active:translate-y-0 cursor-pointer"
+        >
+          {/* Pulsing indicator light */}
+          <span className="absolute -top-1 -right-1 flex h-3 w-3">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+          </span>
+          
+          <MessageSquare className="w-4 h-4 animate-pulse" />
+          <span className="font-extrabold uppercase leading-none">Suporte WhatsApp</span>
+        </a>
+      </div>
 
       {/* OVERLAYS MODALS DRAWER ENGINE */}
       <AnimatePresence>
