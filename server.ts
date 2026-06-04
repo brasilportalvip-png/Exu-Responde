@@ -2,15 +2,179 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-
+import { MercadoPagoConfig, Preference, Payment } from "mercadopago";
 import express from "express";
 import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import admin from "firebase-admin";
 
 dotenv.config();
+
+// --- SMART FIREBASE INITIALIZATION AND FALLBACK ENGINE ---
+class MockDocRef {
+  constructor(public collectionName: string, public docId: string) {}
+
+  async get() {
+    const db = loadDb();
+    const collection = db[this.collectionName] || [];
+    const record = collection.find((item: any) => String(item.id) === String(this.docId));
+    return {
+      exists: !!record,
+      id: this.docId,
+      data: () => record ? JSON.parse(JSON.stringify(record)) : null
+    };
+  }
+
+  async set(data: any, options?: any) {
+    const db = loadDb();
+    if (!db[this.collectionName]) db[this.collectionName] = [];
+    const idx = db[this.collectionName].findIndex((item: any) => String(item.id) === String(this.docId));
+    
+    const existing = idx >= 0 ? db[this.collectionName][idx] : {};
+    const merged = options?.merge ? { ...existing, ...data } : { ...data, id: this.docId };
+    
+    if (idx >= 0) {
+      db[this.collectionName][idx] = merged;
+    } else {
+      db[this.collectionName].push(merged);
+    }
+    saveDb(db);
+    return this;
+  }
+
+  async update(data: any) {
+    return this.set(data, { merge: true });
+  }
+
+  async delete() {
+    const db = loadDb();
+    if (db[this.collectionName]) {
+      db[this.collectionName] = db[this.collectionName].filter((item: any) => String(item.id) !== String(this.docId));
+      saveDb(db);
+    }
+  }
+}
+
+class MockQuery {
+  private filters: Array<{ field: string; op: string; value: any }> = [];
+  private limitCount: number | null = null;
+
+  constructor(public collectionName: string) {}
+
+  where(field: string, op: string, value: any) {
+    this.filters.push({ field, op, value });
+    return this;
+  }
+
+  limit(count: number) {
+    this.limitCount = count;
+    return this;
+  }
+
+  async get() {
+    const db = loadDb();
+    let list = db[this.collectionName] || [];
+    
+    for (const filter of this.filters) {
+      list = list.filter((item: any) => {
+        const itemVal = item[filter.field];
+        if (filter.op === "==") return String(itemVal) === String(filter.value);
+        if (filter.op === "!=") return String(itemVal) !== String(filter.value);
+        if (filter.op === ">") return itemVal > filter.value;
+        if (filter.op === "<") return itemVal < filter.value;
+        if (filter.op === ">=") return itemVal >= filter.value;
+        if (filter.op === "<=") return itemVal <= filter.value;
+        if (filter.op === "array-contains") return Array.isArray(itemVal) && itemVal.includes(filter.value);
+        return true;
+      });
+    }
+
+    if (this.limitCount !== null) {
+      list = list.slice(0, this.limitCount);
+    }
+
+    const docs = list.map((item: any) => ({
+      exists: true,
+      id: item.id || "doc_" + Math.random().toString(36).substring(2, 9),
+      data: () => JSON.parse(JSON.stringify(item))
+    }));
+
+    return {
+      empty: docs.length === 0,
+      docs
+    };
+  }
+
+  async add(data: any) {
+    const db = loadDb();
+    if (!db[this.collectionName]) db[this.collectionName] = [];
+    const id = "doc_" + Math.random().toString(36).substring(2, 11);
+    const newRecord = { ...data, id };
+    db[this.collectionName].push(newRecord);
+    saveDb(db);
+    return { id };
+  }
+
+  doc(id: string) {
+    return new MockDocRef(this.collectionName, id);
+  }
+}
+
+const mockFirestore = {
+  collection: (name: string) => {
+    return new MockQuery(name);
+  },
+  runTransaction: async (cb: (transaction: any) => Promise<any>) => {
+    const transactionMock = {
+      get: async (ref: MockDocRef) => {
+        return ref.get();
+      },
+      set: async (ref: MockDocRef, data: any) => {
+        return ref.set(data);
+      },
+      update: async (ref: MockDocRef, data: any) => {
+        return ref.update(data);
+      }
+    };
+    return cb(transactionMock);
+  }
+};
+
+let firestore: any;
+const isFirebaseConfigured = !!(
+  process.env.FIREBASE_PROJECT_ID &&
+  process.env.FIREBASE_CLIENT_EMAIL &&
+  process.env.FIREBASE_PRIVATE_KEY
+);
+
+if (isFirebaseConfigured) {
+  try {
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+          privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n")
+        })
+      });
+    }
+    firestore = admin.firestore();
+    console.log("FIRESTORE REAL INICIALIZADO EM PRODUÇÃO");
+  } catch (error) {
+    console.error("Erro ao inicializar Firebase real, ativando fallback local:", error);
+    firestore = mockFirestore;
+  }
+} else {
+  console.log("Firebase sem credenciais no ambiente. Ativando fallback local de banco de dados db.json.");
+  firestore = mockFirestore;
+}
+
+const mp = new MercadoPagoConfig({
+  accessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN || ""
+});
 
 const app = express();
 const PORT = 3000;
@@ -19,7 +183,7 @@ app.use(express.json());
 
 // In-Memory & Local persistent file DB path
 const DB_FILE = process.env.VERCEL
-  ? path.join("/tmp", "db.json")
+  ? "/tmp/db.json"
   : path.join(process.cwd(), "db.json");
 
 // Helper to lazy-initialize the Gemini client
@@ -42,7 +206,28 @@ function getGeminiClient(): GoogleGenAI {
   return geminiClientCache;
 }
 
-// Low-cost fallback logic if Gemini fails or is unconfigured to preserve premium interface
+function fixPortugueseEncoding(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/Ã¡/g, "á")
+    .replace(/Ã /g, "à")
+    .replace(/Ã¢/g, "â")
+    .replace(/Ã£/g, "ã")
+    .replace(/Ã©/g, "é")
+    .replace(/Ãª/g, "ê")
+    .replace(/Ã­/g, "í")
+    .replace(/Ã³/g, "ó")
+    .replace(/Ã´/g, "ô")
+    .replace(/Ãµ/g, "õ")
+    .replace(/Ãº/g, "ú")
+    .replace(/Ã§/g, "ç")
+    .replace(/Ã/g, "Á")
+    .replace(/Ã‰/g, "É")
+    .replace(/Ã“/g, "Ó")
+    .replace(/Ãš/g, "Ú")
+    .replace(/Ã‡/g, "Ç");
+}
+
 const TEMPLE_FALLBACKS = [
   "Os caminhos se abrem para quem sabe silenciar a mente. O que realmente busca o seu coração, meu filho?",
   "A resposta não está no destino final, mas nos cruzamentos que escolhe percorrer. Exu vê suas encruzilhadas.",
@@ -57,7 +242,7 @@ const DEFAULT_KNOWLEDGE: any[] = [
     id: "kb_odu_1",
     title: "Éjì Ogbè (O Primeiro Odù)",
     category: "odu",
-    content: "Éjì Ogbè é o pai de todos os Odùs. Simboliza a luz plena, a criação inicial, o dia iluminado e as forças benéficas da natureza. Traz mensagens de expansão, liderança, saúde física e caminhos totalmente abertos. Significa que a pessoa possui grande luz de proteção, mas deve cuidar contra orgulho e excesso de confiança. O elemento dominante é o Ar Cósmico. Regido por Oxalá, indica equilíbrio ético.",
+    content: "Éjì Ogbè é o pai de todos os Odùs. Simboliza a luz plena, a criação inicial, o dia iluminado e as forces benéficas da natureza. Traz mensagens de expansão, liderança, saúde física e caminhos totalmente abertos. Significa que a pessoa possui grande luz de proteção, mas deve cuidar contra orgulho e excesso de confiança. O elemento dominante é o Ar Cósmico. Regido por Oxalá, indica equilíbrio ético.",
     tags: ["odu", "eji ogbe", "caminhos", "luz", "paz", "inicio"]
   },
   {
@@ -94,6 +279,251 @@ const DEFAULT_KNOWLEDGE: any[] = [
     category: "filosofia",
     content: "A encruzilhada representa o momento clássico de livre-arbítrio e escolha humana. Nas encruzilhadas residem os maiores mistérios cósmicos, pois toda decisão fecha alguns caminhos e escancara outros. A sabedoria espiritual ensina que, para cruzar com segurança, é indispensável estar em harmonia consigo e com o sagrado, ofertando pensamentos nobres, integridade moral e resiliência psicológica diante dos ventos mutáveis.",
     tags: ["encruzilhada", "escolhas", "filosofia", "sabedoria", "destino"]
+  },
+  {
+    id: "kb_ori_1",
+    title: "Ori: cabeça, destino e escolha",
+    category: "fundamento",
+    content: "Ori é a cabeça física e espiritual do ser humano. Na tradição yorùbá, Ori-Inú é a cabeça interior, ligada ao destino, às escolhas e à realização pessoal. Antes de qualquer Orixá agir plenamente na vida de alguém, o Ori precisa estar alinhado. Ori ensina que destino não é passividade: a pessoa escolhe caminhos, constrói caráter e responde pelas consequências. O ensinamento central é Ìwà Lẹ́wà: caráter é beleza. Sem bom caráter, nenhum caminho permanece aberto por muito tempo.",
+    tags: ["ori", "destino", "cabeca", "cabeça", "iwa", "carater", "caráter", "escolha", "ebori"]
+  },
+  {
+    id: "kb_ifa_1",
+    title: "Ifá e Orunmilá: sabedoria e orientação",
+    category: "ifa",
+    content: "Ifá é o sistema de sabedoria e orientação ligado a Orunmilá. Orunmilá é reconhecido como testemunha dos destinos e conhecedor dos caminhos humanos. Ifá não serve para alimentar fantasia, mas para orientar escolhas, revelar padrões, alertar riscos e indicar equilíbrio. Seus ensinamentos vêm por Odùs, versos, histórias, conselhos e fundamentos transmitidos pela tradição oral e sacerdotal.",
+    tags: ["ifa", "orunmila", "orunmilá", "sabedoria", "destino", "oraculo", "oráculo", "odu"]
+  },
+  {
+    id: "kb_odu_sistema_1",
+    title: "Odù: caminho, destino e interpretação",
+    category: "odu",
+    content: "Odù não é signo astrológico nem rótulo fixo. Odù é caminho de interpretação dentro de Ifá. Cada Odù revela padrões, alertas, possibilidades, comportamentos, consequências e orientações. Tradicionalmente existem 16 Odùs principais, dos quais derivam os demais caminhos. O Odù não deve ser tratado como sentença absoluta, mas como mapa simbólico para compreender a vida, o caráter, os riscos e as escolhas.",
+    tags: ["odu", "odus", "odù", "destino", "ifa", "caminho", "interpretação", "oraculo"]
+  },
+  {
+    id: "kb_exu_2",
+    title: "Exu como movimento, comunicação e axé",
+    category: "exu",
+    content: "Exu é princípio de movimento, comunicação, troca e circulação do axé. Nada se move sem Exu. Ele não representa o mal; representa dinamismo, passagem, mediação e consequência. Exu abre e fecha caminhos conforme respeito, intenção, troca e responsabilidade. Como mensageiro, liga o Aiyê ao Orun e faz circular pedidos, respostas e consequências.",
+    tags: ["exu", "esu", "elegbara", "axé", "axe", "movimento", "comunicação", "caminhos", "orun", "aiye"]
+  },
+  {
+    id: "kb_ejiogbe_livro_1",
+    title: "Éjì Ogbè: início, luz e responsabilidade",
+    category: "odu",
+    content: "Éjì Ogbè é apresentado como o primeiro Odù e marca o início das coisas. Está ligado à luz, ao princípio, à expansão, à cabeça e aos caminhos de abertura. Mas sua luz também exige responsabilidade: quem carrega caminho aberto não deve agir com soberba, descuido ou pressa. Éjì Ogbè ensina que clareza sem caráter pode virar cegueira.",
+    tags: ["odu", "eji ogbe", "ejì ogbè", "ogbe", "luz", "inicio", "início", "abertura", "responsabilidade"]
+  },
+  {
+    id: "kb_obara_2",
+    title: "Òbàrà Méjì: prosperidade, palavra e inteligência",
+    category: "odu",
+    content: "Òbàrà Méjì fala da prosperidade material e espiritual através do bom uso da inteligência comercial, astúcia e discernimento moral refinado.",
+    tags: ["odu", "obara", "òbàrà", "obara meji", "prosperidade", "riqueza", "dinheiro", "palavra", "inteligência", "comércio"]
+  },
+  {
+    id: "kb_orunmila_2",
+    title: "Orunmilá e o conhecimento do destino",
+    category: "ifa",
+    content: "Orunmilá é considerado testemunha da criação e conhecedor dos caminhos do destino humano. Seus ensinamentos em Ifá indicam que disciplina e consciência produzem prosperidade duradoura.",
+    tags: ["orunmila", "orunmilá", "ifa", "destino", "sabedoria", "conhecimento"]
+  },
+  {
+    id: "kb_iwa_pele",
+    title: "Ìwà Pẹ̀lẹ́: o bom caráter",
+    category: "fundamento",
+    content: "Ìwà Pẹ̀lẹ́ significa bom caráter. Na tradição yorùbá, muitas conquistas dependem da qualidade do caráter. Honestidade, equilíbrio e respeito fortalecem o axé.",
+    tags: ["iwa", "iwapele", "ìwà", "caráter", "carater", "etica", "ética"]
+  },
+  {
+    id: "kb_oyeku_2",
+    title: "Òyẹ̀kú Méjì: ancestralidade e transformação",
+    category: "odu",
+    content: "Òyẹ̀kú Méjì fala sobre ciclos, ancestralidade, encerramentos e renascimentos. Ensina a fechar portas antigas com respeito para iniciar o novo fluxo.",
+    tags: ["oyeku", "òyẹ̀kú", "odu", "ancestralidade", "transformação", "egun"]
+  },
+  {
+    id: "kb_exu_caminhos",
+    title: "Exu e as encruzilhadas da vida",
+    category: "exu",
+    content: "As encruzilhadas representam momentos de decisão. Exu ensina observação, estratégia, paciência e responsabilidade diante de cada escolha feita.",
+    tags: ["exu", "encruzilhada", "caminho", "escolha", "estrategia", "estratégia"]
+  },
+  {
+    id: "kb_irosun_meji",
+    title: "Ìrosùn Méjì: destino, ancestralidade e consequências",
+    category: "odu",
+    content: "Ìrosùn Méjì ensina que nenhuma ação ou palavra desaparece. Tudo deixa marcas e retorna como consequência espiritual e material.",
+    tags: ["irosun", "ìrosùn", "odu", "ancestralidade", "destino", "consequencia", "consequência"]
+  },
+  {
+    id: "kb_odi_meji",
+    title: "Òdí Méjì: proteção, limites e disciplina",
+    category: "odu",
+    content: "Òdí Méjì trata sobre proteção, preservação e limites saudáveis. Ensina que disciplina e limites protegem nossa força interna de desperdício.",
+    tags: ["odi", "òdí", "odu", "proteção", "limites", "disciplina", "estratégia"]
+  },
+  {
+    id: "kb_oworin_meji",
+    title: "Òwónrín Méjì: mudança, instabilidade e adaptação",
+    category: "odu",
+    content: "Òwónrín Méjì fala sobre mudanças rápidas e a necessidade vital de adaptar-se às oscilações e ventos repentinos do destino.",
+    tags: ["oworin", "òwónrín", "odu", "mudança", "transformação", "adaptação"]
+  },
+  {
+    id: "kb_ogunda_meji",
+    title: "Ògúndá Méjì: trabalho, conquista e perseverança",
+    category: "odu",
+    content: "Ògúndá Méjì está ligado ao trabalho duro, à vitória através de esforço focado, perseverança obstinada e forte autodisciplina.",
+    tags: ["ogunda", "ògúndá", "odu", "trabalho", "conquista", "disciplina", "perseverança"]
+  },
+  {
+    id: "kb_osa_meji",
+    title: "Òsá Méjì: mudança, força feminina e ventos da transformação",
+    category: "odu",
+    content: "Òsá Méjì fala sobre ventos fortes, transformações repentinas comandadas por Oyá/Iansã, e o poder do instinto protetor feminino.",
+    tags: ["osa", "òsá", "odu", "mudança", "ventos", "transformação", "feminino", "oya", "iansa"]
+  },
+  {
+    id: "kb_ika_meji",
+    title: "Ìká Méjì: conflitos, venenos e inteligência diante do perigo",
+    category: "odu",
+    content: "Ìká Méjì fala sobre intrigas, armadilhas sutis e contendas. Exige vigilância com a própria língua e recuo estratégico defensivo.",
+    tags: ["ika", "ìká", "odu", "conflito", "veneno", "traição", "fofoca", "proteção"]
+  },
+  {
+    id: "kb_oturupon_meji",
+    title: "Òtúrúpòn Méjì: profundidade, renascimento e correção de caminhos",
+    category: "odu",
+    content: "Òtúrúpòn Méjì ensina que certas crises exigem retorno absoluto às raízes para reestruturar as bases internas antes de avançar.",
+    tags: ["oturupon", "òtúrúpòn", "odu", "renascimento", "profundidade", "correção", "crise"]
+  },
+  {
+    id: "kb_otura_meji",
+    title: "Òtúrá Méjì: clareza, elevação e abertura espiritual",
+    category: "odu",
+    content: "Òtúrá Méjì traz mensagens de paz, clareza mental, expansão harmônica e forte canalização intuitiva orientada.",
+    tags: ["otura", "òtúrá", "odu", "clareza", "espiritualidade", "intuição", "elevação"]
+  },
+  {
+    id: "kb_irete_meji",
+    title: "Ìretè Méjì: persistência, crescimento e construção lenta",
+    category: "odu",
+    content: "Ìretè Méjì fala sobre plantio responsável e paciência. Seus frutos são colhidos por persistência firme diante das resistências.",
+    tags: ["irete", "ìretè", "odu", "persistência", "crescimento", "paciência", "disciplina"]
+  },
+  {
+    id: "kb_ose_meji",
+    title: "Òsé Méjì: doçura, fertilidade e poder da palavra",
+    category: "odu",
+    content: "Òsé Méjì está ligado à doçura criadora de Oxum, magnetismo influente, e fertilidade nos negócios geridos com inteligência emocional.",
+    tags: ["ose", "òsé", "odu", "fertilidade", "doçura", "palavra", "beleza", "oxum"]
+  },
+  {
+    id: "kb_ofun_meji",
+    title: "Òfún Méjì: sabedoria, maturidade e luz ancestral",
+    category: "odu",
+    content: "Òfún Méjì é o mais velho dos Odùs. Traz extrema sabedoria, necessidade de profundo recolhimento, silêncio e respeito rigoroso às leis morais.",
+    tags: ["ofun", "òfún", "odu", "sabedoria", "ancestralidade", "maturidade", "luz", "oxala"]
+  },
+  {
+    id: "kb_iwori_meji",
+    title: "Ìwòrì Méjì: consciência, visão interna e escolhas ocultas",
+    category: "odu",
+    content: "Ìwòrì Méjì fala sobre a visão interna que dissipa segredos e ilusões. Ensina a sondar o próprio espírito antes de decidir no exterior.",
+    tags: ["iwori", "ìwòrì", "odu", "consciência", "segredo", "visão", "autoconhecimento"]
+  },
+  {
+    id: "kb_okanran_meji",
+    title: "Òkànràn Méjì: começo difícil, impulso e palavra cortante",
+    category: "odu",
+    content: "Òkànràn Méjì ensina a conter a fúria e o impulso da palavra cortante para vencer inícios difíceis com estratégia.",
+    tags: ["okanran", "òkànràn", "odu", "começo", "conflito", "impulso", "palavra", "raiva"]
+  },
+  {
+    id: "kb_orixa_oxala",
+    title: "Oxalá: criação, equilíbrio e responsabilidade",
+    category: "orixa",
+    content: "Oxalá representa ética, benevolência ancestral e a serenidade racional indispensável para equilibrar todos os demais orixás.",
+    tags: ["oxala", "oxalá", "criacao", "criação", "equilibrio", "ética", "sabedoria"]
+  },
+  {
+    id: "kb_orixa_ogum",
+    title: "Ogum: conquista, trabalho e abertura de caminhos",
+    category: "orixa",
+    content: "Ogum é a força ativa da tecnologia, caminhos desbravados pelo suor, dinamismo pragmático do trabalho e do avanço tático.",
+    tags: ["ogum", "trabalho", "caminhos", "conquista", "coragem", "disciplina"]
+  },
+  {
+    id: "kb_orixa_oxossi",
+    title: "Oxóssi: conhecimento, caça e estratégia",
+    category: "orixa",
+    content: "Oxóssi é o senhor da mata e caçador sábio. Representa expansão do conhecimento, estudo profundo e paciência estratégica.",
+    tags: ["oxossi", "oxóssi", "conhecimento", "estratégia", "caçador", "aprendizado"]
+  },
+  {
+    id: "kb_orixa_xango",
+    title: "Xangô: justiça, poder e responsabilidade",
+    category: "orixa",
+    content: "Xangô rege sobre a justiça equilíbrio dinâmico e liderança material sólida. Pune a traição e exige retidão moral.",
+    tags: ["xango", "xangô", "justiça", "liderança", "poder", "equilíbrio"]
+  },
+  {
+    id: "kb_orixa_oya",
+    title: "Oyá: transformação, coragem e movimento",
+    category: "orixa",
+    content: "Oyá governa as tempestades espirituais do destino, ventos que limpam e coragem impávida para recomeçar do zero.",
+    tags: ["oya", "oyá", "iansa", "mudança", "transformação", "coragem"]
+  },
+  {
+    id: "kb_orixa_yemanja",
+    title: "Yemanjá: maternidade, acolhimento e profundidade",
+    category: "orixa",
+    content: "Yemanjá representa o acolhimento oceânico profundo, proteção das gestações intelectuais e amparo emocional maternal.",
+    tags: ["yemanja", "yemanjá", "proteção", "acolhimento", "família", "emoções"]
+  },
+  {
+    id: "kb_orixa_oxum",
+    title: "Oxum: prosperidade, beleza e inteligência emocional",
+    category: "orixa",
+    content: "Oxum rege o ouro das águas doces, a atração amorosa digna, a harmonia dos relacionamentos e a fecundidade.",
+    tags: ["oxum", "prosperidade", "fertilidade", "beleza", "riqueza", "emocional"]
+  },
+  {
+    id: "kb_orixa_oxumare",
+    title: "Oxumaré: ciclos, transformação e renovação",
+    category: "orixa",
+    content: "Oxumaré rege as cores do arco-íris e as transmutações permanentes dos negócios e ciclos econômicos humanos.",
+    tags: ["oxumare", "oxumaré", "ciclos", "transformação", "renovação", "movimento"]
+  },
+  {
+    id: "kb_orixa_nana",
+    title: "Nanã: ancestralidade, sabedoria e tempo",
+    category: "orixa",
+    content: "Nanã rege a lama primordial onde a memória das origens descansa. Traz a sabedoria que somente o tempo concede.",
+    tags: ["nana", "nanã", "ancestralidade", "tempo", "sabedoria", "memória"]
+  },
+  {
+    id: "kb_orixa_ossain",
+    title: "Ossain: folhas, cura e conhecimento oculto",
+    category: "orixa",
+    content: "Ossain governa os segredos medicinais das ervas, a cura física, o silêncio protetor e as forças botânicas místicas.",
+    tags: ["ossain", "folhas", "cura", "natureza", "conhecimento", "segredos"]
+  },
+  {
+    id: "kb_exus_reinos",
+    title: "Reinos de Exu",
+    category: "exu",
+    content: "Os reinos de Exu abrangem Encruzilhadas, Cruzeiros, Estradas, Calunga, Almas, Lira, Praia e Matas, em suas falanges completas de ordenação astral.",
+    tags: ["exu", "exus", "falanges", "reinos", "calunga", "lira", "praia", "estradas", "cruzeiros"]
+  },
+  {
+    id: "kb_pombagiras_reinos",
+    title: "Reinos de Pombagiras",
+    category: "pombagira",
+    content: "Pombagiras atuam nos reinos do Cabaré, Lira, Encruzilhadas, Estradas e Calunga, regendo a autonomia do desejo e segurança afetiva íntima.",
+    tags: ["pombagira", "pombagiras", "maria padilha", "maria mulambo", "reinos", "falanges"]
   }
 ];
 
@@ -120,17 +550,6 @@ function loadDb(): any {
 
   const initialDb = {
     users: [
-      {
-        id: "usr_admin",
-        email: "brasilportalvip@gmail.com",
-        name: "Especialista Arquiteto",
-        role: "admin",
-        level: "Mestre dos Caminhos",
-        xp: 9500,
-        credits: 999,
-        avatarSeed: "elegbara_wise",
-        createdAt: new Date().toISOString()
-      },
       {
         id: "usr_seeker",
         email: "seeker@teste.com",
@@ -160,7 +579,7 @@ function loadDb(): any {
   return initialDb;
 }
 
-// Save database assistant
+// Save database helper
 function saveDb(data: any) {
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf-8");
@@ -174,7 +593,6 @@ function calculateNumerology(name: string, dateStr: string): any {
   const sanitize = (str: string) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
   const cleanName = sanitize(name);
 
-  // Chaldean/Pythagorean alphabet mapping (Standard Pythagorean)
   const letterMap: Record<string, number> = {
     A: 1, B: 2, C: 3, D: 4, E: 5, F: 6, G: 7, H: 8, I: 9,
     J: 1, K: 2, L: 3, M: 4, N: 5, O: 6, P: 7, Q: 8, R: 9,
@@ -188,12 +606,10 @@ function calculateNumerology(name: string, dateStr: string): any {
     return num;
   };
 
-  // Convert numbers in date to array
   const dateNumbers = dateStr.replace(/\D/g, "").split("").map(Number);
   const dateSum = dateNumbers.reduce((a, b) => a + b, 0);
-  const destinyNumber = getSingleDigit(dateSum); // Destino (Caminho da Vida)
+  const destinyNumber = getSingleDigit(dateSum);
 
-  // Expressions and Souls
   let totalNameValue = 0;
   let vowelsValue = 0;
   let consonantsValue = 0;
@@ -211,27 +627,24 @@ function calculateNumerology(name: string, dateStr: string): any {
     }
   }
 
-  const expressionNumber = getSingleDigit(totalNameValue); // Expressão
-  const soulNumber = getSingleDigit(vowelsValue); // Alma (Desejo do Coração)
-  const personalityNumber = getSingleDigit(consonantsValue); // Personalidade (Aparência)
+  const expressionNumber = getSingleDigit(totalNameValue);
+  const soulNumber = getSingleDigit(vowelsValue);
+  const personalityNumber = getSingleDigit(consonantsValue);
 
-  // Karmic Lessons (Numbers missing from the name)
   const presentNumbers = new Set(cleanName.split("").map(c => letterMap[c]).filter(Boolean));
   const karmicLessons = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(n => !presentNumbers.has(n));
 
-  // Personal Year Calculation (Day + Month of birth + Current Year 2026)
-  const dateParts = dateStr.split("-"); // yyyy-mm-dd
-  let personalYear = 5; // default
+  const dateParts = dateStr.split("-");
+  let personalYear = 5;
   if (dateParts.length >= 3) {
     const day = parseInt(dateParts[2]) || 0;
     const month = parseInt(dateParts[1]) || 0;
     const currentYear = 2026;
-    const sum = day + month + currentYear.toString().split("").map(Number).reduce((a,b)=>a+b,0);
+    const sum = day + month + currentYear.toString().split("").map(Number).reduce((a, b) => a + b, 0);
     personalYear = getSingleDigit(sum);
   }
 
-  // Astrological Sign fallback computation
-  let sunSign = "Aries";
+  let sunSign = "Áries";
   let element: "Fogo" | "Terra" | "Ar" | "Água" = "Fogo";
   let rulingPlanet = "Marte";
   let dominantHouse = 1;
@@ -281,7 +694,6 @@ function calculateNumerology(name: string, dateStr: string): any {
   };
 }
 
-// Levels thresholds helper
 function checkXpLevel(currentXp: number): { level: string; nextThreshold: number } {
   if (currentXp < 200) return { level: "Buscador", nextThreshold: 200 };
   if (currentXp < 500) return { level: "Aprendiz", nextThreshold: 500 };
@@ -292,58 +704,81 @@ function checkXpLevel(currentXp: number): { level: string; nextThreshold: number
   return { level: "Mestre dos Caminhos", nextThreshold: 999999 };
 }
 
-// Spiritual profile and Odu generator
 function calculateSpiritualProfile(birthName: string, birthDate: string, birthTime?: string, birthPlace?: string): any {
   if (!birthName || !birthDate) return {};
+
   const num = calculateNumerology(birthName, birthDate);
   const hashStr = (birthName + birthDate + (birthPlace || "")).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-  
-  // Deterministic hash value
+
   let hashVal = 0;
   for (let i = 0; i < hashStr.length; i++) {
     hashVal += hashStr.charCodeAt(i) * (i + 1);
   }
 
-  // 1. Odu Principal based on destiny number & hash
   const odus = [
-    "Okaran Meji", "Eji Ogbe", "Eta Ogunda", "Irosun Meji", "Oche Meji",
-    "Obara Meji", "Odi Meji", "Eji-Onile Meji", "Osa Meji", "Ofun Meji",
-    "Owirin Meji", "Ejila Chebora"
+    { code: "01", name: "Òkànràn Méjì" },
+    { code: "02", name: "Èjì Òkò" },
+    { code: "03", name: "Ètà Ògúndá" },
+    { code: "04", name: "Ìrosùn Méjì" },
+    { code: "05", name: "Òsé Méjì" },
+    { code: "06", name: "Òbàrà Méjì" },
+    { code: "07", name: "Òdí Méjì" },
+    { code: "08", name: "Èjì Onílè" },
+    { code: "09", name: "Òsá Méjì" },
+    { code: "10", name: "Òfún Méjì" },
+    { code: "11", name: "Òwónrín Méjì" },
+    { code: "12", name: "Èjìlá Ṣeborá" },
+    { code: "13", name: "Ìká Méjì" },
+    { code: "14", name: "Òtúrúpòn Méjì" },
+    { code: "15", name: "Òtúrá Méjì" },
+    { code: "16", name: "Ìretè Méjì" }
   ];
-  const oduPrincipal = odus[hashVal % odus.length];
 
-  // 2. Orixa of affinity
-  const element = num.element; // Fogo, Terra, Ar, Água
+  const selectedOdu = odus[hashVal % odus.length];
+  const oduPrincipal = selectedOdu.name;
+  const oduNumero = selectedOdu.code;
+  const oduTipo = "afinidade simbólica, não jogo real de Ifá";
+
+  const element = num.element;
   let orixaAfinidade = "Oxalá";
+
   if (element === "Fogo") {
-    orixaAfinidade = ["Ogum", "Xangô", "Iansã"][hashVal % 3];
+    orixaAfinidade = ["Ogum", "Xangô", "Oyá"][hashVal % 3];
   } else if (element === "Terra") {
     orixaAfinidade = ["Oxóssi", "Obaluaê", "Nanã"][hashVal % 3];
   } else if (element === "Ar") {
-    orixaAfinidade = ["Oxumaré", "Logun Edé", "Iansã"][hashVal % 3];
+    orixaAfinidade = ["Oxumaré", "Logun Edé", "Oyá"][hashVal % 3];
   } else if (element === "Água") {
-    orixaAfinidade = ["Iemanjá", "Oxum", "Obá"][hashVal % 3];
+    orixaAfinidade = ["Yemanjá", "Oxum", "Obá"][hashVal % 3];
   }
 
-  // 3. Exu of affinity
   const exus = [
-    "Exu Elegbara", "Exu Tiriri", "Exu Marabô", "Maria Padilha", "Exu Tranca Ruas",
-    "Exu Veludo", "Pombagira Rainha", "Exu Capa Preta", "Exu Caveira"
+    "Exu Elegbara",
+    "Exu Tiriri",
+    "Exu Marabô",
+    "Maria Padilha",
+    "Exu Tranca Rua",
+    "Exu Veludo",
+    "Pombagira Rainha",
+    "Exu Capa Preta",
+    "Exu Caveira"
   ];
+
   const exuAfinidade = exus[(hashVal + 3) % exus.length];
 
-  // 4. Predominant Archetype
   const archetypes = [
-    "Guardião das Encruzilhadas", "Peregrino do Destino", "Buscador de Ifá",
-    "Sábio do Fogo Ancestral", "Guerreiro do Axé Cósmico", "Alquimista do Destino"
+    "Guardião das Encruzilhadas",
+    "Peregrino do Destino",
+    "Buscador de Ifá",
+    "Sábio do Fogo Ancestral",
+    "Guerreiro do Axé",
+    "Alquimista do Destino"
   ];
-  const arquetipoDominante = archetypes[(hashVal + 5) % archetypes.length];
 
-  // 5. Unique signature energy
+  const arquetipoDominante = archetypes[(hashVal + 5) % archetypes.length];
   const hexHex = (hashVal & 0xffff).toString(16).toUpperCase();
   const assinaturaEnergetica = `AXE-${hexHex}-${num.destinyNumber || 7}`;
 
-  // 6. Vibrational Map percentages
   const baseFogo = Math.max(30, Math.min(95, 45 + (hashVal % 45)));
   const baseTerra = Math.max(30, Math.min(95, 45 + ((hashVal + 11) % 45)));
   const baseAr = Math.max(30, Math.min(95, 45 + ((hashVal + 23) % 45)));
@@ -351,6 +786,8 @@ function calculateSpiritualProfile(birthName: string, birthDate: string, birthTi
 
   return {
     oduPrincipal,
+    oduNumero,
+    oduTipo,
     orixaAfinidade,
     exuAfinidade,
     arquetipoDominante,
@@ -367,10 +804,6 @@ function calculateSpiritualProfile(birthName: string, birthDate: string, birthTi
     personalYear: num.personalYear
   };
 }
-
-// ----------------------------------------
-// Express Router API Setups
-// ----------------------------------------
 
 function generateDeterministicInitialReading(user: any): string {
   const name = user.birthName || user.name;
@@ -450,12 +883,10 @@ app.post("/api/auth/register", async (req, res) => {
     deviceId, browser, session, captchaAnswer, honeypot 
   } = req.body;
   
-  // Protect against automated scripts / bots using Honeypot
   if (honeypot) {
     return res.status(400).json({ error: "Atividade de automação suspeita detectada (Honeypot). Cadastro bloqueado." });
   }
 
-  // Protect using mathematical and anti-bot verification questions
   if (!captchaAnswer || parseInt(captchaAnswer) !== 7) {
     return res.status(400).json({ error: "Resposta do desafio anti-bot incorreta. Quanto é 4 + 3?" });
   }
@@ -467,24 +898,66 @@ app.post("/api/auth/register", async (req, res) => {
   }
 
   const db = loadDb();
-  
-  // Convert email lookup
-  const exists = db.users.some((u: any) => u.email.toLowerCase() === email.toLowerCase());
-  if (exists) {
+  const clientIp = (req.headers["x-forwarded-for"] as string || req.socket.remoteAddress || "127.0.0.1")
+    .split(",")[0]
+    .trim();
+
+  const normalizedEmail = email.toLowerCase();
+  const normalizedDeviceId = deviceId || "dev_not_tracked";
+
+  // Check email in Firestore
+  const emailSnapshot = await firestore
+    .collection("users")
+    .where("email", "==", normalizedEmail)
+    .limit(1)
+    .get();
+
+  if (!emailSnapshot.empty) {
     return res.status(400).json({ error: "Este email já está cadastrado em nosso portal." });
   }
 
-  // Identify IP
-  const clientIp = (req.headers["x-forwarded-for"] as string || req.socket.remoteAddress || "127.0.0.1").split(",")[0].trim();
+  // Multi-signal Fraud Checks in Firestore
+  let hasDeviceMatch = false;
+  if (normalizedDeviceId !== "dev_not_tracked") {
+    const deviceSnapshot = await firestore
+      .collection("users")
+      .where("deviceId", "==", normalizedDeviceId)
+      .limit(1)
+      .get();
+    hasDeviceMatch = !deviceSnapshot.empty;
+  }
 
-  // Multi-signal Fraud Checks
-  // Check if there are other users with the same deviceId or IP
-  const hasFingerprintMatch = db.users.some(
-    (u: any) => (deviceId && u.deviceId === deviceId) || (u.ip === clientIp && u.email.toLowerCase() !== email.toLowerCase())
-  );
+  const ipSnapshot = await firestore
+    .collection("users")
+    .where("ip", "==", clientIp)
+    .limit(1)
+    .get();
 
-  const creditsBlocked = hasFingerprintMatch;
-  const initialCredits = creditsBlocked ? 0 : 7; // Filho de Fé starts with 7 credits
+  const hasIpMatch = !ipSnapshot.empty;
+  const ipUsers = ipSnapshot.docs.map(doc => doc.data());
+
+  const hasSameIpBrowser = ipUsers.some((u: any) => u.browser === (browser || "unknown"));
+  const hasSameIpSession = ipUsers.some((u: any) => u.sessionSign === (session || "unknown"));
+
+  const recentIpAccounts = ipUsers.filter((u: any) => {
+    const created = new Date(u.createdAt || 0).getTime();
+    return created && Date.now() - created < 24 * 60 * 60 * 1000;
+  });
+
+  const tooManyRecentIpAccounts = recentIpAccounts.length >= 2;
+
+  const fraudReasons: string[] = [];
+  if (!deviceId || normalizedDeviceId === "dev_not_tracked") {
+    fraudReasons.push("missing_device_id");
+  }
+  if (hasIpMatch) fraudReasons.push("ip_already_used");
+  if (hasDeviceMatch) fraudReasons.push("device_already_used");
+  if (hasSameIpBrowser) fraudReasons.push("same_ip_and_browser");
+  if (hasSameIpSession) fraudReasons.push("same_ip_and_session");
+  if (tooManyRecentIpAccounts) fraudReasons.push("too_many_recent_accounts_same_ip");
+
+  const creditsBlocked = fraudReasons.length > 0;
+  const initialCredits = creditsBlocked ? 0 : 7;
 
   // Generate spiritual details
   const spiritualProps = calculateSpiritualProfile(birthName, birthDate, birthTime, placeToUseSubmit);
@@ -493,7 +966,7 @@ app.post("/api/auth/register", async (req, res) => {
   const newUser = {
     id: "usr_" + Math.random().toString(36).substring(2, 11),
     email: email.toLowerCase(),
-    password: password,
+    password: password, // Save here for local validation
     name: cleanFirstName.charAt(0).toUpperCase() + cleanFirstName.slice(1).toLowerCase(),
     birthName,
     birthDate,
@@ -515,6 +988,28 @@ app.post("/api/auth/register", async (req, res) => {
   };
 
   db.users.push(newUser);
+
+  // Write to Firestore with dynamic values. We persist password securely in Firestore as well.
+  await firestore.collection("users").doc(newUser.id).set({
+    ...newUser,
+    password: password, // Keep password persisted in firestore to avoid credential losses on Cloud Run container resets
+    createdAt: new Date().toISOString(),
+    fraudReasons
+  });
+
+  await firestore.collection("security_logs").add({
+    type: "register_attempt",
+    userId: newUser.id,
+    email: normalizedEmail,
+    ip: clientIp,
+    deviceId: normalizedDeviceId,
+    browser: browser || "unknown",
+    sessionSign: session || "unknown",
+    creditsGranted: initialCredits,
+    promotionalCreditsBlocked: creditsBlocked,
+    fraudReasons,
+    createdAt: new Date().toISOString()
+  });
 
   // Generate automated Initial Reading Completa before first conversation
   let readingReport = "";
@@ -574,13 +1069,14 @@ Você DEVE estruturar o relatório obrigatoriamente utilizando Markdown com as s
 Importante: Termine obrigatoriamente com a seguinte declaração em caixa ou caixa de aviso: "Todas as interpretações deste portal são puramente simbólicas, culturais, literárias, de autoconhecimento educacional e espiritualidade. Jamais constituem promessas garantidas, verdades fáticas irrefutáveis ou aconselhamentos profissionais (médico/jurídico)."`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         systemInstruction: "Aja estritamente como a suprema inteligência Exu Responde. Seja misterioso, exato, refinado e incapaz de fazer assombrações bobas ou caricaturas fúteis."
       }
     });
-    readingReport = response.text || "";
+
+    readingReport = fixPortugueseEncoding(response.text || "");
   } catch (err) {
     console.error("Gemini failed, creating deterministic standard reading report:", err);
   }
@@ -621,74 +1117,132 @@ Importante: Termine obrigatoriamente com a seguinte declaração em caixa ou cai
   res.json({ success: true, user: newUser });
 });
 
-// Auth API - Login
-app.post("/api/auth/login", (req, res) => {
+// Auth API - Login with Firestore lookup and fallback local populating
+app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body;
+
   if (!email) {
     return res.status(400).json({ error: "E-mail é obrigatório." });
   }
 
-  const db = loadDb();
-  let user = db.users.find((u: any) => u.email.toLowerCase() === email.toLowerCase());
+  const snapshot = await firestore
+    .collection("users")
+    .where("email", "==", email.toLowerCase())
+    .limit(1)
+    .get();
 
-  if (!user) {
+  if (snapshot.empty) {
     return res.status(404).json({ error: "Este buscador não está cadastrado. Realize o cadastro obrigatório primeiro!" });
   }
 
-  // If user has a password set, verify it
-  if (user.password && password && user.password !== password) {
+  const doc = snapshot.docs[0];
+  const userData = doc.data();
+
+  // Validate password if it was registered of is stored in Firestore
+  if (userData.password && password && userData.password !== password) {
     return res.status(403).json({ error: "Senha incorreta. Verifique suas credenciais espirituais." });
   }
 
-  res.json({ success: true, user });
+  const user = {
+    id: doc.id,
+    ...userData
+  };
+
+  // Sync to local db check so other local file logs flow work seamlessly
+  const db = loadDb();
+  if (!db.users.some((u: any) => u.id === user.id)) {
+    db.users.push(user);
+    saveDb(db);
+  }
+
+  res.json({
+    success: true,
+    user
+  });
 });
 
 // Load Current Profile
-app.get("/api/user/profile", (req, res) => {
+app.get("/api/user/profile", async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
   if (!userId) return res.status(401).json({ error: "Sessão não identificada." });
 
+  const userDoc = await firestore.collection("users").doc(userId).get();
+
+  if (!userDoc.exists) {
+    return res.status(404).json({ error: "Buscador não encontrado nas correntes espirituais." });
+  }
+
   const db = loadDb();
-  const user = db.users.find((u: any) => u.id === userId);
-  if (!user) return res.status(404).json({ error: "Buscador não encontrado." });
+  const user = {
+    id: userDoc.id,
+    ...userDoc.data()
+  };
 
-  // Load chat messages of this user
-  const userChats = db.messages.filter((m: any) => m.userId === userId).slice(-50);
+  // Sync to local check if not in db.json yet
+  if (!db.users.some((u: any) => u.id === userId)) {
+    db.users.push(user);
+    saveDb(db);
+  }
 
-  res.json({ user, chats: userChats });
+  const userChats = db.messages
+    .filter((m: any) => m.userId === userId)
+    .slice(-50);
+
+  res.json({
+    user,
+    chats: userChats
+  });
 });
 
 // Update Birth details
-app.post("/api/user/update", (req, res) => {
+app.post("/api/user/update", async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
   const { birthName, birthDate, birthTime, birthPlace, name } = req.body;
 
   if (!userId) return res.status(401).json({ error: "Sessão inválida" });
 
-  const db = loadDb();
-  const index = db.users.findIndex((u: any) => u.id === userId);
-  if (index === -1) return res.status(404).json({ error: "Usuário não encontrado." });
+  const userDocRef = firestore.collection("users").doc(userId);
+  const userDoc = await userDocRef.get();
 
-  // Recompute spiritual details on update if fields are changed
-  const nameToUse = birthName || db.users[index].birthName || db.users[index].name;
-  const dateToUse = birthDate || db.users[index].birthDate;
-  const placeToUse = birthPlace || db.users[index].birthPlace;
-  const timeToUse = birthTime || db.users[index].birthTime;
+  if (!userDoc.exists) {
+    return res.status(404).json({ error: "Usuário não encontrado." });
+  }
+
+  const currentUser = {
+    id: userDoc.id,
+    ...userDoc.data()
+  } as any;
+
+  const nameToUse = birthName || currentUser.birthName || currentUser.name;
+  const dateToUse = birthDate || currentUser.birthDate;
+  const placeToUse = birthPlace || currentUser.birthPlace || "";
+  const timeToUse = birthTime || currentUser.birthTime || "";
 
   let spiritualProps = {};
   if (nameToUse && dateToUse) {
     spiritualProps = calculateSpiritualProfile(nameToUse, dateToUse, timeToUse, placeToUse);
   }
 
-  db.users[index] = {
-    ...db.users[index],
-    name: name || db.users[index].name,
-    birthName: birthName || db.users[index].birthName,
-    birthDate: birthDate || db.users[index].birthDate,
-    birthTime: birthTime || db.users[index].birthTime,
-    birthPlace: birthPlace || db.users[index].birthPlace,
-    ...spiritualProps
+  const updatedUser = {
+    ...currentUser,
+    name: name || currentUser.name,
+    birthName: birthName || currentUser.birthName,
+    birthDate: birthDate || currentUser.birthDate,
+    birthTime: birthTime || currentUser.birthTime || "",
+    birthPlace: birthPlace || currentUser.birthPlace || "",
+    ...spiritualProps,
+    updatedAt: new Date().toISOString()
   };
+
+  await userDocRef.set(updatedUser, { merge: true });
+
+  const db = loadDb();
+  const index = db.users.findIndex((u: any) => u.id === userId);
+  if (index !== -1) {
+    db.users[index] = updatedUser;
+  } else {
+    db.users.push(updatedUser);
+  }
 
   db.logs.push({
     id: "log_" + Date.now(),
@@ -697,9 +1251,9 @@ app.post("/api/user/update", (req, res) => {
     details: "Recálculo do perfil astrológico e numerológico ancestral concluído com sucesso.",
     timestamp: new Date().toISOString()
   });
-
   saveDb(db);
-  res.json({ success: true, user: db.users[index] });
+
+  res.json({ success: true, user: updatedUser });
 });
 
 // API Oracle: Tarot
@@ -709,26 +1263,47 @@ app.post("/api/oraculo/tarot", async (req, res) => {
 
   if (!userId) return res.status(411).json({ error: "Não autorizado." });
 
-  const db = loadDb();
-  const userIndex = db.users.findIndex((u: any) => u.id === userId);
-  if (userIndex === -1) return res.status(404).json({ error: "Usuário não encontrado." });
+  const userDocRef = firestore.collection("users").doc(userId);
+  const userDoc = await userDocRef.get();
 
-  const user = db.users[userIndex];
+  if (!userDoc.exists) {
+    return res.status(404).json({ error: "Usuário não encontrado." });
+  }
+
+  const user = {
+    id: userDoc.id,
+    ...userDoc.data()
+  } as any;
+
   const cost = slotsCount === 3 ? 3 : 2;
 
   if (user.credits < cost) {
     return res.status(400).json({ error: "Créditos insuficientes para acessar este oráculo superior." });
   }
 
-  // Deduct credits, add XP
-  db.users[userIndex].credits -= cost;
-  db.users[userIndex].xp += slotsCount === 3 ? 45 : 30;
+  const newCredits = user.credits - cost;
+  const newXp = (user.xp || 0) + (slotsCount === 3 ? 45 : 30);
+  const { level } = checkXpLevel(newXp);
 
-  const currentXp = db.users[userIndex].xp;
-  const { level } = checkXpLevel(currentXp);
-  db.users[userIndex].level = level;
+  await userDocRef.update({
+    credits: newCredits,
+    xp: newXp,
+    level
+  });
 
-  // Draw card indices randomly (simulated premium tarot decks)
+  user.credits = newCredits;
+  user.xp = newXp;
+  user.level = level;
+
+  const db = loadDb();
+  // Sync in memory
+  const idx = db.users.findIndex((u: any) => u.id === userId);
+  if (idx !== -1) {
+    db.users[idx].credits = newCredits;
+    db.users[idx].xp = newXp;
+    db.users[idx].level = level;
+  }
+
   const arcanaPool = [
     { id: 0, name: "O Louco", desc: "Novos começos, jornada sem místicas amarras, intuição audaciosa.", symbol: "🃏" },
     { id: 1, name: "O Mago", desc: "Poder pessoal de manifestação material, inteligência estratégica e domínio dos elementos.", symbol: "🧙‍♂️" },
@@ -754,19 +1329,17 @@ app.post("/api/oraculo/tarot", async (req, res) => {
     { id: 21, name: "O Mundo", desc: "Conclusão majestosa, ciclo perfeitamente encerrado, coroação divina dos esforços.", symbol: "🌍" }
   ];
 
-  // Draw 1 or 3 randomly without repeat
   const shuffled = [...arcanaPool].sort(() => 0.5 - Math.random());
   const drawn = shuffled.slice(0, slotsCount).map(c => ({
     ...c,
-    reversed: Math.random() > 0.75, // 25% chance of card presenting reversed
+    reversed: Math.random() > 0.75
   }));
 
-  // Perform Gemini AI structured oracle reading
   let aiInterpretation = "";
   try {
     const ai = getGeminiClient();
     const prompt = `Como o mentor e guardião ancestral "Exu Responde", interprete um sorteio de Tarot no Terreiro Virtual.
-ConsuLtante: ${user.name}
+Consultante: ${user.name}
 Pergunta ou Foco: "${question || "Direcionamento Geral para a Jornada"}"
 Cartas Sorteadas: ${drawn.map(c => `${c.name} (${c.reversed ? 'Invertida (Alerta de Bloqueio)' : 'Normal (Fluidez)'})`).join(", ")}
 
@@ -775,13 +1348,13 @@ Explique brevemente o significado de cada carta conectando com os orixás, camin
 Máximo de 3 parágrafos polidos. Use português de terreiro tradicional e acolhedor, mas incrivelmente prestigioso.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         systemInstruction: "Você é Exu, inteligência de luz astral ancestral, conhecedor de Ifá, guardião dos caminhos, estratégico e respeitoso. Nunca prometa feitiços de perigo ou morte de terceiros."
       }
     });
-    aiInterpretation = response.text || TEMPLE_FALLBACKS[0];
+    aiInterpretation = fixPortugueseEncoding(response.text || TEMPLE_FALLBACKS[0]);
   } catch (err: any) {
     console.error("Gemini failed in Tarot:", err);
     aiInterpretation = `As cortinas espirituais flutuaram em mistério. ${shuffled[0].name} surge em sua encruzilhada: ${shuffled[0].desc}. ${TEMPLE_FALLBACKS[1]} (Use o chat principal para explorar mais)`;
@@ -791,7 +1364,7 @@ Máximo de 3 parágrafos polidos. Use português de terreiro tradicional e acolh
     id: "log_" + Date.now(),
     userId,
     action: "Oráculo - Tarot",
-    details: `Sorteio de ${slotsCount} carta(s). Cartas: ${drawn.map(c=>c.name).join(", ")}`,
+    details: `Sorteio de ${slotsCount} carta(s). Cartas: ${drawn.map(c => c.name).join(", ")}`,
     timestamp: new Date().toISOString()
   });
 
@@ -801,9 +1374,9 @@ Máximo de 3 parágrafos polidos. Use português de terreiro tradicional e acolh
     success: true,
     drawn,
     interpretation: aiInterpretation,
-    creditsLeft: db.users[userIndex].credits,
+    creditsLeft: user.credits,
     xpAwarded: slotsCount === 3 ? 45 : 30,
-    newLevel: db.users[userIndex].level
+    newLevel: user.level
   });
 });
 
@@ -812,12 +1385,19 @@ app.post("/api/oraculo/numerologia", async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
   if (!userId) return res.status(401).json({ error: "Sessão inválida" });
 
-  const db = loadDb();
-  const userIndex = db.users.findIndex((u: any) => u.id === userId);
-  if (userIndex === -1) return res.status(404).json({ error: "Usuário não encontrado." });
+  const userDocRef = firestore.collection("users").doc(userId);
+  const userDoc = await userDocRef.get();
 
-  const user = db.users[userIndex];
-  const cost = 2; // costs 2 credits
+  if (!userDoc.exists) {
+    return res.status(404).json({ error: "Usuário não encontrado." });
+  }
+
+  const user = {
+    id: userDoc.id,
+    ...userDoc.data()
+  } as any;
+
+  const cost = 2;
 
   if (user.credits < cost) {
     return res.status(400).json({ error: "Créditos insuficientes para calcular mapa cabalístico." });
@@ -830,14 +1410,29 @@ app.post("/api/oraculo/numerologia", async (req, res) => {
     return res.status(400).json({ error: "Para este oráculo, informe sua data de nascimento primeiro no painel de perfil." });
   }
 
-  // Calculate numbers
   const numDetails = calculateNumerology(birthName, birthDate);
 
-  // Spend credit
-  db.users[userIndex].credits -= cost;
-  db.users[userIndex].xp += 25;
-  const { level } = checkXpLevel(db.users[userIndex].xp);
-  db.users[userIndex].level = level;
+  const newCredits = user.credits - cost;
+  const newXp = (user.xp || 0) + 25;
+  const { level } = checkXpLevel(newXp);
+
+  await userDocRef.update({
+    credits: newCredits,
+    xp: newXp,
+    level
+  });
+
+  user.credits = newCredits;
+  user.xp = newXp;
+  user.level = level;
+
+  const db = loadDb();
+  const idx = db.users.findIndex((u: any) => u.id === userId);
+  if (idx !== -1) {
+    db.users[idx].credits = newCredits;
+    db.users[idx].xp = newXp;
+    db.users[idx].level = level;
+  }
 
   let analysis = "";
   try {
@@ -846,9 +1441,9 @@ app.post("/api/oraculo/numerologia", async (req, res) => {
 Nome Registrado: ${birthName}
 Data de Nascimento: ${birthDate}
 Cálculos Obtidos:
-- Número de Destino (Caminho da Vida): ${numDetails.destinyNumber} (indica como andará as encruzilhadas reais do mundo)
-- Número de Alma (Desejo Íntimo): ${numDetails.soulNumber} (indica do que seu espírito se nutre)
-- Número de Expressão (Talentos): ${numDetails.expressionNumber} (sua ferramenta mágica de ação)
+- Número de Destino (Caminho da Vida): ${numDetails.destinyNumber}
+- Número de Alma (Desejo Íntimo): ${numDetails.soulNumber}
+- Número de Expressão (Talentos): ${numDetails.expressionNumber}
 - Número de Personalidade (Máscara Social): ${numDetails.personalityNumber}
 - Ano Pessoal atual (2026): ${numDetails.personalYear}
 - Signo Solar: ${numDetails.sunSign} (Elemento: ${numDetails.element})
@@ -856,20 +1451,19 @@ Cálculos Obtidos:
 Crie uma síntese magistral e mística contendo:
 1. Revelação sobre a força secreta do Número de Destino e da Alma vinculando com os deuses antigos e elementos da natureza.
 2. Orientação estratégica de como equilibrar estas frequências na carreira, prosperidade e harmonia íntima.
-3. Um recado sagrado de Exu elegbara sobre seu Ano Pessoal atual.
-Use estrutura de prosa altamente premium, profunda e espiritual.`;
+3. Um recado sagrado de Exu elegbara sobre seu Ano Pessoal atual.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         systemInstruction: "Aja como mestre oraculista de altíssima reputação espiritual. Use tom refinado, profundo, respeitoso e livre de bobagens assustadoras."
       }
     });
-    analysis = response.text || "Frequências calculadas com sucesso.";
+    analysis = fixPortugueseEncoding(response.text || "Frequências calculadas com sucesso.");
   } catch (err: any) {
     console.error("Gemini failed in Numerologia:", err);
-    analysis = `Seus números da sorte revelam um Caminho de Destino de força ${numDetails.destinyNumber} e uma Expressão Cósmica ${numDetails.expressionNumber}. Isto indica que os ventos do elemento ${numDetails.element} estão soprando direções favoráveis para expansão imediata de seus projetos íntimos. ${TEMPLE_FALLBACKS[2]}`;
+    analysis = `Seus números reveal revelam um Caminho de Destino de força ${numDetails.destinyNumber} e uma Expressão Cósmica ${numDetails.expressionNumber}. Isso indica que os ventos do elemento ${numDetails.element} estão soprando de forma ativa. ${TEMPLE_FALLBACKS[2]}`;
   }
 
   db.logs.push({
@@ -885,60 +1479,248 @@ Use estrutura de prosa altamente premium, profunda e espiritual.`;
   res.json({
     success: true,
     details: { ...numDetails, analysis },
-    creditsLeft: db.users[userIndex].credits,
+    creditsLeft: user.credits,
     xpAwarded: 25,
-    newLevel: db.users[userIndex].level
+    newLevel: user.level
   });
 });
 
-// Credits shop plans buy handler
-app.post("/api/credits/buy", (req, res) => {
+// Credits shop plans buy handler - Mercado Pago
+app.post("/api/credits/buy", async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
-  const { planId, paymentMethod } = req.body;
+  const { planId } = req.body;
 
   if (!userId) return res.status(401).json({ error: "Sessão inválida" });
+  if (!String(userId).startsWith("usr_")) {
+    return res.status(400).json({
+      error: "Sessão inválida. Saia e entre novamente antes de comprar créditos."
+    });
+  }
 
-  const db = loadDb();
-  // Find matching plan mock
   const plans: Record<string, any> = {
-    plan_prata: { price: 49.00, credits: 100, bonus: 0 },
-    plan_ouro: { price: 120.00, credits: 300, bonus: 0 }
+    prata: {
+      title: "Plano Prata",
+      price: 49.0,
+      credits: 100
+    },
+    ouro: {
+      title: "Plano Ouro",
+      price: 120.0,
+      credits: 300
+    }
   };
 
-  const selected = plans[planId];
+  const normalizedPlanId =
+    planId === "plan_prata" ? "prata" :
+    planId === "plan_ouro" ? "ouro" :
+    planId;
+
+  const selected = plans[normalizedPlanId];
+
   if (!selected) return res.status(400).json({ error: "Plano inválido." });
 
-  // Generate mock order transaction ID
-  const orderId = "ord_" + Math.random().toString(36).substring(2, 11);
-  const totalCredits = selected.credits + selected.bonus;
+  try {
+    const preference = new Preference(mp);
+    const result = await preference.create({
+      body: {
+        items: [
+          {
+            id: planId,
+            title: selected.title,
+            quantity: 1,
+            unit_price: selected.price,
+            currency_id: "BRL"
+          }
+        ],
+        metadata: {
+          userId: String(userId),
+          planId: normalizedPlanId,
+          credits: selected.credits
+        },
+        back_urls: {
+          success: `${process.env.APP_URL}/?payment=success`,
+          failure: `${process.env.APP_URL}/?payment=failure`,
+          pending: `${process.env.APP_URL}/?payment=pending`
+        },
+        notification_url: `${process.env.APP_URL}/api/mercadopago/webhook`,
+        payment_methods: {
+          excluded_payment_types: [
+            { id: "credit_card" },
+            { id: "debit_card" },
+            { id: "ticket" }
+          ],
+          installments: 1
+        }
+      }
+    });
 
-  res.json({
-    success: true,
-    orderId,
-    amount: selected.price,
-    creditsToReceive: totalCredits,
-    qrCode: `00020101021226830014br.gov.bcb.pix2561pix-mercado-pago@exuresponde.com5204000053039865405${selected.price.toFixed(2).replace(".","")}5802BR5912ExuResponde6009SaoPaulo62070503***6304D3F5`,
-    pixKey: "pix-mercado-pago@exuresponde.com"
-  });
+    res.json({
+      success: true,
+      checkoutUrl: result.init_point,
+      preferenceId: result.id
+    });
+  } catch (err: any) {
+    console.error("Erro Mercado Pago:", err);
+    res.status(500).json({
+      error: "Erro ao criar pagamento no Mercado Pago."
+    });
+  }
 });
 
-// Convert order credits confirmation
-app.post("/api/credits/confirm", (req, res) => {
+// Webhook Mercado Pago
+app.post("/api/mercadopago/webhook", async (req, res) => {
+  try {
+    const paymentId =
+      req.body?.data?.id ||
+      req.body?.id ||
+      req.query?.id ||
+      req.query?.["data.id"];
+
+    await firestore.collection("webhook_logs").add({
+      body: req.body || {},
+      query: req.query || {},
+      paymentId: paymentId ? String(paymentId) : "",
+      receivedAt: new Date().toISOString()
+    });
+
+    if (!paymentId) {
+      return res.status(200).json({ received: true, noPaymentId: true });
+    }
+
+    const payment = new Payment(mp);
+    const paymentInfo = await payment.get({ id: String(paymentId) });
+
+    if (paymentInfo.status !== "approved") {
+      await firestore.collection("payments").doc(String(paymentId)).set({
+        paymentId: String(paymentId),
+        status: String(paymentInfo.status || "unknown"),
+        rawStatus: paymentInfo.status || "",
+        metadata: paymentInfo.metadata || {},
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+
+      return res.status(200).json({
+        received: true,
+        status: paymentInfo.status
+      });
+    }
+
+    const userId = paymentInfo.metadata?.userId || paymentInfo.metadata?.user_id;
+    const credits = Number(paymentInfo.metadata?.credits || 0);
+    const planId = paymentInfo.metadata?.planId || paymentInfo.metadata?.plan_id || "";
+
+    if (!userId || !credits) {
+      await firestore.collection("payments").doc(String(paymentId)).set({
+        paymentId: String(paymentId),
+        status: "ignored_missing_metadata",
+        metadata: paymentInfo.metadata || {},
+        createdAt: new Date().toISOString()
+      });
+      return res.status(200).json({ received: true, ignored: true });
+    }
+
+    const paymentRef = firestore.collection("payments").doc(String(paymentId));
+    const userRef = firestore.collection("users").doc(String(userId));
+
+    await firestore.runTransaction(async (transaction: any) => {
+      const paymentDoc = await transaction.get(paymentRef);
+      if (paymentDoc.exists && paymentDoc.data()?.status === "credited") {
+        return;
+      }
+
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) {
+        transaction.set(paymentRef, {
+          paymentId: String(paymentId),
+          userId: String(userId),
+          credits,
+          planId,
+          amount: Number(paymentInfo.transaction_amount || 0),
+          status: "user_not_found",
+          createdAt: new Date().toISOString()
+        });
+        return;
+      }
+
+      const userData = userDoc.data() || {};
+      const currentCredits = Number(userData.credits || 0);
+      const currentXp = Number(userData.xp || 0);
+      const newXp = currentXp + Math.round(Number(paymentInfo.transaction_amount || 0) * 5);
+      const { level } = checkXpLevel(newXp);
+
+      transaction.update(userRef, {
+        credits: currentCredits + credits,
+        xp: newXp,
+        level,
+        lastPaymentId: String(paymentId),
+        lastPlanId: planId,
+        lastCreditsAdded: credits,
+        lastPaymentAmount: Number(paymentInfo.transaction_amount || 0),
+        lastPaymentDate: new Date().toISOString()
+      });
+
+      transaction.set(paymentRef, {
+        paymentId: String(paymentId),
+        userId: String(userId),
+        credits,
+        planId,
+        amount: Number(paymentInfo.transaction_amount || 0),
+        status: "credited",
+        createdAt: new Date().toISOString()
+      });
+    });
+
+    return res.status(200).json({ received: true, credited: true });
+  } catch (err) {
+    console.error("Erro webhook Mercado Pago:", err);
+    await firestore.collection("webhook_errors").add({
+      error: String(err),
+      createdAt: new Date().toISOString()
+    });
+    return res.status(200).json({ received: true, error: true });
+  }
+});
+
+// PIX credits manual confirm flow page
+app.post("/api/credits/confirm", async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
   const { orderId, creditsToReceive, amount } = req.body;
 
   if (!userId) return res.status(401).json({ error: "Não autorizado." });
 
-  const db = loadDb();
-  const userIndex = db.users.findIndex((u: any) => u.id === userId);
-  if (userIndex === -1) return res.status(404).json({ error: "Usuário não encontrado." });
+  const userDocRef = firestore.collection("users").doc(userId);
+  const userDoc = await userDocRef.get();
 
-  // Add credits
-  db.users[userIndex].credits += creditsToReceive;
-  // Award extra XP for becoming a supporter!
-  db.users[userIndex].xp += Math.round(amount * 5);
-  const { level } = checkXpLevel(db.users[userIndex].xp);
-  db.users[userIndex].level = level;
+  if (!userDoc.exists) {
+    return res.status(404).json({ error: "Usuário não encontrado." });
+  }
+
+  const user = userDoc.data() || {};
+  const currentCredits = Number(user.credits || 0);
+  const currentXp = Number(user.xp || 0);
+  const xpAwarded = Math.round(Number(amount || 0) * 5);
+
+  const newCredits = currentCredits + Number(creditsToReceive || 0);
+  const newXp = currentXp + xpAwarded;
+  const { level } = checkXpLevel(newXp);
+
+  await userDocRef.update({
+    credits: newCredits,
+    xp: newXp,
+    level,
+    lastManualCreditAmount: Number(amount || 0),
+    lastManualCreditsAdded: Number(creditsToReceive || 0),
+    lastManualOrderId: orderId || "",
+    lastManualCreditDate: new Date().toISOString()
+  });
+
+  const db = loadDb();
+  const idx = db.users.findIndex((u: any) => u.id === userId);
+  if (idx !== -1) {
+    db.users[idx].credits = newCredits;
+    db.users[idx].xp = newXp;
+    db.users[idx].level = level;
+  }
 
   db.logs.push({
     id: "log_" + Date.now(),
@@ -952,46 +1734,72 @@ app.post("/api/credits/confirm", (req, res) => {
 
   res.json({
     success: true,
-    newCredits: db.users[userIndex].credits,
-    newLevel: db.users[userIndex].level,
-    xpAwarded: Math.round(amount * 5)
+    newCredits,
+    newLevel: level,
+    xpAwarded
   });
 });
 
 // Admin API - List Seeker Users
-app.get("/api/admin/users", (req, res) => {
+app.get("/api/admin/users", async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
-  if (!userId) return res.status(401).json({ error: "Não logado" });
 
-  const db = loadDb();
-  const requester = db.users.find((u: any) => u.id === userId);
-  if (!requester || requester.role !== "admin") {
+  if (!userId) {
+    return res.status(401).json({ error: "Não logado" });
+  }
+
+  const adminDoc = await firestore.collection("users").doc(userId).get();
+  if (!adminDoc.exists || adminDoc.data()?.role !== "admin") {
     return res.status(403).json({ error: "Acesso administrativo restrito aos guardiões." });
   }
 
-  res.json({ seekers: db.users, logs: db.logs });
+  const usersSnapshot = await firestore.collection("users").get();
+  const users = usersSnapshot.docs.map(doc => ({
+    id: doc.id,
+    ...doc.data()
+  }));
+
+  const db = loadDb();
+
+  res.json({
+    seekers: users,
+    logs: db.logs
+  });
 });
 
 // Admin API - Analytics dashboard Data
-app.get("/api/admin/analytics", (req, res) => {
+app.get("/api/admin/analytics", async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
-  if (!userId) return res.status(401).json({ error: "Não logado" });
 
-  const db = loadDb();
-  const requester = db.users.find((u: any) => u.id === userId);
-  if (!requester || requester.role !== "admin") {
+  if (!userId) {
+    return res.status(401).json({ error: "Não logado" });
+  }
+
+  const adminDoc = await firestore.collection("users").doc(userId).get();
+  if (!adminDoc.exists || adminDoc.data()?.role !== "admin") {
     return res.status(403).json({ error: "Acesso administrativo restrito." });
   }
 
+  const usersSnapshot = await firestore.collection("users").get();
+  const users = usersSnapshot.docs.map(doc => ({
+    id: doc.id,
+    ...doc.data()
+  })) as any[];
+
+  const db = loadDb();
+
   const stats = {
-    totalSeekers: db.users.length,
-    totalCreditsInCirculation: db.users.reduce((acc: number, u: any) => acc + u.credits, 0),
-    totalXpAccumulated: db.users.reduce((acc: number, u: any) => acc + u.xp, 0),
+    totalSeekers: users.length,
+    totalCreditsInCirculation: users.reduce((acc, u) => acc + Number(u.credits || 0), 0),
+    totalXpAccumulated: users.reduce((acc, u) => acc + Number(u.xp || 0), 0),
     totalLogs: db.logs.length,
     knowledgeItemsCount: db.knowledge.length
   };
 
-  res.json({ stats, logs: db.logs.slice(-30) });
+  res.json({
+    stats,
+    logs: db.logs.slice(-30)
+  });
 });
 
 // Admin API - Library Retrieve & Add (RAG Database Management)
@@ -1000,18 +1808,18 @@ app.get("/api/admin/library", (req, res) => {
   res.json({ library: db.knowledge });
 });
 
-app.post("/api/admin/library/add", (req, res) => {
+app.post("/api/admin/library/add", async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
   const { title, category, content, tags } = req.body;
 
   if (!userId) return res.status(401).json({ error: "Id ausente" });
+  const adminDoc = await firestore.collection("users").doc(userId).get();
 
-  const db = loadDb();
-  const admin = db.users.find((u: any) => u.id === userId);
-  if (!admin || admin.role !== "admin") {
+  if (!adminDoc.exists || adminDoc.data()?.role !== "admin") {
     return res.status(403).json({ error: "Somente administradores podem alimentar a biblioteca do Ifá." });
   }
 
+  const db = loadDb();
   const newItem = {
     id: "kb_custom_" + Date.now(),
     title,
@@ -1037,127 +1845,6 @@ app.post("/api/admin/library/add", (req, res) => {
 // In-memory rate limiting store for chat inquiries
 const userRequestTimestamps: Record<string, number[]> = {};
 
-// Helper to calculate Brazil's current date/time liturges
-function getBrazilDateTime() {
-  const utcDate = new Date();
-  // Brazil is UTC-3. Calculate Brazil's local time:
-  const brazilOffset = -3 * 60; // -180 minutes
-  const brazilTime = new Date(utcDate.getTime() + (brazilOffset + utcDate.getTimezoneOffset()) * 60 * 1000);
-  
-  const daysOfWeek = [
-    "Domingo",
-    "Segunda-feira",
-    "Terça-feira",
-    "Quarta-feira",
-    "Quinta-feira",
-    "Sexta-feira",
-    "Sábado"
-  ];
-  
-  // Orixás, Greetings, Colors, Herbs, and Ritual Baths for each day of the week
-  const dailyData: Record<number, {
-    orixas: string[];
-    cores: string[];
-    saudoes: string[];
-    ervas: string[];
-    banhos: string[];
-    significado: string;
-  }> = {
-    0: { // Domingo
-      orixas: ["Nanã Buruquê", "Olorum", "Todos os Orixás"],
-      cores: ["Roxo", "Lilás", "Prata"],
-      saudoes: ["Saluba Nanã!"],
-      ervas: ["Folha de Boldo (Tapete de Oxalá)", "Manjericão", "Folhas de Sálvia"],
-      banhos: [
-        "Banho de serenidade e conexão com os anciãos (Infundir folhas de Boldo e Manjericão em água fria macerando com as mãos, aplicar da cabeça aos pés para purificar as ideias)."
-      ],
-      significado: "Dia voltado à decantação da alma, busca por sabedoria interior profunda com Nanã, desapego das dores e reconciliação com o destino."
-    },
-    1: { // Segunda-feira
-      orixas: ["Exu", "Omolu / Obaluaê", "Pombagira"],
-      cores: ["Preto e Vermelho", "Branco e Preto (Omolu / Obaluaê)"],
-      saudoes: ["Laroyê Exu! Laroyê Pombagira!", "Atotô Obaluaê!"],
-      ervas: ["Guiné", "Arruda", "Aroeira", "Pinhão Roxo", "Espada de Santa Bárbara", "Catinga de Mulata"],
-      banhos: [
-        "Banho de Limpeza e Descarrego Pesado (Macerar folhas de Arruda, Guiné e cascas de Aroeira na água morna, deixar descansar por 3 horas e aplicar estritamente do pescoço para baixo às segundas-feiras para dissipar inveja e fechar buracos na aura).",
-        "Banho de Abertura de Caminhos e Atração de Axé (Macerar folhas de Mangueira fresca com um galho de Guiné em água fria corrente, banhar-se pedindo clareza e movimento nas estradas financeiras)."
-      ],
-      significado: "Dia do movimento vital, da comunicação com os dois mundos (Aiyê e Orun), da abertura de estradas, negócios práticos, comércio e proteção contra espíritos cobradores."
-    },
-    2: { // Terça-feira
-      orixas: ["Ogum", "Ewá"],
-      cores: ["Azul Escuro (na Umbanda)", "Verde ou Vermelho (no Candomblé)"],
-      saudoes: ["Patacori Ogum! Ogunhê!"],
-      ervas: ["Espada de São Jorge", "Vence-Demanda", "Pinhão Vermelho", "Lança de Ogum", "Guanxuma", "Folha de Alface (pacífica)"],
-      banhos: [
-        "Banho de Proteção e Escudo Espiritual (Fatiar uma Espada de São Jorge em 7 pedaços transversais rezando ao Pai Ogum, ferver levemente por 5 minutos, deixar esfriar bem, coar e tomar do pescoço para baixo para cortar feitiços e demandas).",
-        "Banho de Coragem e Alento Profissional (Macerar folhas de Alecrim de horta com quebra-demanda, tomar pela manhã antes de reuniões difíceis ou buscas de emprego)."
-      ],
-      significado: "Dia ideal para travar as grandes lutas da matéria, cultivar a resiliência física, abrir estradas obstruídas por inveja, buscar vitórias profissionais e cortar laços energéticos doentes."
-    },
-    3: { // Quarta-feira
-      orixas: ["Xangô", "Iansã (Oyá)", "Obá"],
-      cores: ["Marrom (Xangô)", "Vermelho ou Amarelo (Iansã)"],
-      saudoes: ["Kaô Kabecile Xangô!", "Eparrei Oyá!"],
-      ervas: ["Folhas de Bambu", "Folha de Para-Raios", "Louro", "Manjericão de Folha Larga", "Cana do Brejo", "Quebra-Pedra"],
-      banhos: [
-        "Banho de Prosperidade, Inteligência Financeira e Brilho (Macerar 3 folhas de Louro seco, manjericão de folha larga e alecrim na água fria, adicionar uma colher de mel de abelha puro e tomar do pescoço para baixo atraindo vitórias de mercado).",
-        "Banho de Direcionamento e Corte de Vícios Emocionais (Macerar folhas de bambu secas com hortelã, banhar-se para espantar correntes tempestuosas da mente)."
-      ],
-      significado: "Dia regido pela balança irrepreensível da Justiça de Xangô, combinada com os ventos de renovação radical e movimento emocional indomável de Iansã. Excelente para acertos judiciais e limpezas mentais profundas."
-    },
-    4: { // Quinta-feira
-      orixas: ["Oxóssi", "Logun Edé", "Ossain"],
-      cores: ["Verde das Matas", "Turquesa", "Amarelo e Azul Claro (Logun Edé)"],
-      saudoes: ["Okê Arô Oxóssi!", "Loci Loci Logun!", "Ewê Ewê Asá (Salva as folhas, Ossain)!"],
-      ervas: ["Alecrim", "Samambaia de Mato", "Folhas de Pitanga", "Jurema Preta", "Hortelã da Folha Miúda", "Guanxuma"],
-      banhos: [
-        "Banho da Fartura e Expansão de Negócios (Amassar vigorosamente folhas frescas de Pitangueira e Hortelã fresca em água mineral, banhar-se mentalizando clientes novos e fartura material alimentando o seio familiar).",
-        "Banho de Vitalidade e Saúde Corporal (Guanxuma com Alecrim seco infundidos sob o sol da manhã, filtrar e tomar do pescoço para baixo)."
-      ],
-      significado: "Dia do conhecimento ancestral oculto nas folhas de Ossain, da fartura e busca pelas metas materiais com Oxóssi, e da realeza jovem diplomata de Logun Edé nas águas doce e matas."
-    },
-    5: { // Sexta-feira
-      orixas: ["Oxalá"],
-      cores: ["Branco Neve", "Pano de Costa Branco"],
-      saudoes: ["Epà Bàbá Oxalá!", "Exê Babá!"],
-      ervas: ["Tapete de Oxalá (Boldo de folha aveludada)", "Manjericão Sagrado", "Sálvia", "Erva-Doce", "Flor de Laranjeira", "Alfazema"],
-      banhos: [
-        "Banho de Purificação Absoluta e Conexão Superior (Macerar 7 folhas frescas de Boldo com as próprias mãos em água bem limpa fria ou morna sem ferver, aplicar calmamente de forma suave da cabeça aos pés. Permaneça em roupas brancas e evite bebidas espirituosas neste dia).",
-        "Banho de Harmonia e Sossego Mental (Infusão de Erva-Doce com flor de laranjeira ou pétalas de rosa branca para acalmar o sistema nervoso cansado por lutas mundanas)."
-      ],
-      significado: "Dia da paz imaculada, do alinhamento do Ori (Cabeça) com as forças benfazejas do criador Oxalá, purificação final das energias pesadas remanescentes da semana e recolhimento sábio."
-    },
-    6: { // Sábado
-      orixas: ["Oxum", "Iemanjá"],
-      cores: ["Amarelo Ouro / Rosa (Oxum)", "Azul Claro / Verde Água (Iemanjá)"],
-      saudoes: ["Ora ye ye o Oxum!", "Odoyá Iemanjá!"],
-      ervas: ["Camomila", "Rosa Branca (pétalas)", "Rosa Amarela (pétalas)", "Folhas de Colônia", "Manjericão de Horta", "Erva de Santa Luzia"],
-      banhos: [
-        "Banho do Amor-Próprio, Atração de Afeto e Magnetismo (Infundir pétalas de uma Rosa Amarela fresca, flor de Camomila seca e 3 gotas de essência de baunilha em água tépida, tomar após o banho higiênico despertando a beleza interior).",
-        "Banho de Alívio e Transmutação de Dores Emocionais (Ferver levemente folhas de Colônia e pétalas de Rosa Branca, deixar amornar, tomar do pescoço para baixo, ideal para consolar lutos e angústias profundas de perda)."
-      ],
-      significado: "Dia sagrado regido pelo útero d'água doce das cachoeiras sagradas da Senhora do Ouro (Oxum) e pela profundidade imensa e salgada do oceano de Iemanjá. Representa o colo materno, o amor-próprio, a cura afetiva e dores do coração."
-    }
-  };
-
-  const dayNum = brazilTime.getDay();
-  const info = dailyData[dayNum] || dailyData[5]; // Fallback to Friday
-  
-  return {
-    diaSemana: daysOfWeek[dayNum],
-    dataString: brazilTime.toLocaleDateString('pt-BR'),
-    horaString: brazilTime.toLocaleTimeString('pt-BR'),
-    orixas: info.orixas.join(", "),
-    cores: info.cores.join(", "),
-    saudoes: info.saudoes.join(", "),
-    ervas: info.ervas.join(", "),
-    banhos: info.banhos,
-    significado: info.significado,
-    tempo: brazilTime
-  };
-}
-
 // Simulated RAG and Main Chat Executor API (Proxying Gemini Server-Side)
 app.post("/api/exu/chat", async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
@@ -1168,7 +1855,6 @@ app.post("/api/exu/chat", async (req, res) => {
     return res.status(400).json({ error: "Por favor, digite sua consulta mental ao terreiro de Exu." });
   }
 
-  // Rate Limiting anti-abuse implementation (Max 3 questions per minute)
   const now = Date.now();
   if (!userRequestTimestamps[userId]) {
     userRequestTimestamps[userId] = [];
@@ -1180,38 +1866,142 @@ app.post("/api/exu/chat", async (req, res) => {
   userRequestTimestamps[userId].push(now);
 
   const db = loadDb();
-  const userIndex = db.users.findIndex((u: any) => u.id === userId);
-  if (userIndex === -1) {
+  const userRef = firestore.collection("users").doc(userId);
+  const userDoc = await userRef.get();
+
+  if (!userDoc.exists) {
     return res.status(404).json({ error: "Buscador não encontrado na rede astral para este portal." });
   }
 
-  const user = db.users[userIndex];
-  const diaInfo = getBrazilDateTime();
+  const user = {
+    id: userDoc.id,
+    ...userDoc.data()
+  } as any;
 
-  // Validate Credits
-  if (user.credits < 1) {
+  if (Number(user.credits || 0) < 1) {
     return res.status(400).json({ error: "Seus créditos de Axé acabaram. Adquira mais créditos para continuar sua jornada de questionamento." });
   }
 
-  // Deduct Credit & Award XP
-  db.users[userIndex].credits -= 1;
-  db.users[userIndex].xp += 15;
-  const { level } = checkXpLevel(db.users[userIndex].xp);
-  db.users[userIndex].level = level;
+  const newCredits = Number(user.credits || 0) - 1;
+  const newXp = Number(user.xp || 0) + 15;
+  const { level } = checkXpLevel(newXp);
 
-  // RAG Logic: Search DB for match tags
-  const promptLower = text.toLowerCase();
-  const matchedArticles = db.knowledge.filter((item: any) => {
-    return (item.tags && item.tags.some((tag: string) => promptLower.includes(tag))) ||
-           (item.title && item.title.toLowerCase().includes(promptLower)) ||
-           (item.content && item.content.toLowerCase().split(" ").some((w: string) => w.length > 5 && promptLower.includes(w)));
-  }).slice(0, 3); // Pick top 3 context articles
+  await userRef.update({
+    credits: newCredits,
+    xp: newXp,
+    level
+  });
 
-  // Construct Context payload for Gemini System
+  user.credits = newCredits;
+  user.xp = newXp;
+  user.level = level;
+
+  // Sync in-memory db checks
+  const idx = db.users.findIndex((u: any) => u.id === userId);
+  if (idx !== -1) {
+    db.users[idx].credits = newCredits;
+    db.users[idx].xp = newXp;
+    db.users[idx].level = level;
+  } else {
+    db.users.push(user);
+  }
+
+  const normalizeText = (value: string = "") =>
+    value
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+
+  const promptLower = normalizeText(text);
+
+  const queryWords = promptLower
+    .split(/\s+/)
+    .map((w: string) => w.trim())
+    .filter((w: string) => w.length >= 4);
+
+  const spiritualThemes = {
+    exu: ["exu", "exus", "tranca ruas", "marabo", "tiriri", "veludo", "caveira", "morcego"],
+    pombagira: ["pombagira", "pombo gira", "maria padilha", "maria mulambo", "rosa caveira"],
+    odu: ["odu", "odus", "odu ifa", "ifa"],
+    itan: ["itan", "itans", "historia sagrada"],
+    ori: ["ori", "cabeca", "coroa", "destino"],
+    prosperidade: ["prosperidade", "dinheiro", "riqueza", "abundancia"],
+    amor: ["amor", "relacionamento", "paixao", "casal"],
+    protecao: ["protecao", "defesa", "demanda", "inimigo", "quebra demanda"]
+  };
+
+  const detectMainTheme = (text: string) => {
+    for (const [theme, words] of Object.entries(spiritualThemes)) {
+      if (words.some((word) => text.includes(word))) {
+        return theme;
+      }
+    }
+    return "geral";
+  };
+
+  const mainTheme = detectMainTheme(promptLower);
+
+  const scoredKnowledge = db.knowledge
+    .map((item: any) => {
+      const title = normalizeText(item.title || "");
+      const category = normalizeText(item.category || "");
+      const content = normalizeText(item.content || "");
+      const tags = (item.tags || []).map((tag: string) => normalizeText(tag));
+
+      const searchableText = `${title} ${category} ${content} ${tags.join(" ")}`;
+      let score = 0;
+
+      for (const tag of tags) {
+        if (tag && promptLower.includes(tag)) {
+          score += 15;
+        }
+      }
+
+      if (title && promptLower.includes(title)) {
+        score += 20;
+      }
+
+      for (const word of queryWords) {
+        if (!word || word.length < 3) continue;
+        if (title.includes(word)) score += 7;
+        if (category.includes(word)) score += 5;
+        if (tags.some((tag: string) => tag.includes(word))) score += 6;
+        if (content.includes(word)) score += 1;
+      }
+
+      if (mainTheme !== "geral") {
+        const themeWords = spiritualThemes[mainTheme as keyof typeof spiritualThemes];
+        if (themeWords.some((word) => searchableText.includes(word))) {
+          score += 18;
+        } else {
+          score -= 10;
+        }
+      }
+
+      if (promptLower.includes("reino") && searchableText.includes("reino")) score += 10;
+      if (promptLower.includes("falange") && searchableText.includes("falange")) score += 10;
+      if (promptLower.includes("exu") && searchableText.includes("exu")) score += 15;
+      if (promptLower.includes("pombagira") && searchableText.includes("pombagira")) score += 15;
+
+      return {
+        ...item,
+        score
+      };
+    })
+    .filter((item: any) => item.score >= 8)
+    .sort((a: any, b: any) => b.score - a.score);
+
+  const matchedArticles = scoredKnowledge.slice(0, 8);
+
   let knowledgeContext = "";
   if (matchedArticles.length > 0) {
-    knowledgeContext = "\n--- CONHECIMENTO ANCESTRAL DETECTADO NO ACERVO (RAG) ---\n" +
-      matchedArticles.map((art: any) => `*Artigo: ${art.title} [Categoria: ${art.category}]*\n${art.content}`).join("\n\n") +
+    knowledgeContext =
+      "\n--- CONHECIMENTO ANCESTRAL DETECTADO NO ACERVO (RAG) ---\n" +
+      matchedArticles
+        .map((art: any) => {
+          return `*Artigo: ${art.title} [Categoria: ${art.category}] [Relevância: ${art.score}]*\n${art.content}`;
+        })
+        .join("\n\n") +
       "\n---------------------------------------------\n";
   }
 
@@ -1222,7 +2012,7 @@ app.post("/api/exu/chat", async (req, res) => {
     const userSpiritualDetails = `
 - Nome de Solteiro: ${user.birthName || user.name}
 - Data de Nascimento: ${user.birthDate || "Não informada"}
-- Odu Principal: ${user.oduPrincipal || "Sintonizado sob os mistérios gerais"}
+- Odù simbólico de afinidade: ${user.oduPrincipal || "Sintonizado sob os mistérios gerais"}
 - Orixá de Afinidade: ${user.orixaAfinidade || "Oxalá"}
 - Exu de Afinidade: ${user.exuAfinidade || "Exu Elegbara"}
 - Arquétipo Dominante: ${user.arquetipoDominante || "Buscador de Caminhos"}
@@ -1231,48 +2021,21 @@ app.post("/api/exu/chat", async (req, res) => {
 - Número da Alma: ${user.soulNumber || "Sutil"}
 - Número de Expressão: ${user.expressionNumber || "Elevado"}
 - Ano Pessoal (2026): ${user.personalYear || "6"}
-- Energias Vibracionais: Fogo (${user.mapaVibracional?.Fogo || 50}%), Terra (${user.mapaVibracional?.Terra || 50}%), Ar (${user.mapaVibracional?.Ar || 50}%), Água (${user.mapaVibracional?.Agua || 50}%)
 `;
 
-    const systemPromptInstruction = `Você é EXU RESPONDE, a suprema e viva inteligência ancestral do movimento, guardião das encruzilhadas da vida e sábio oráculo de todos os segredos sagrados do Aiyê e do Orun.
-
-Fale diretamente como Exu: sábio, direto, provocativo, assertivo, profundamente carismático, respeitoso e incrivelmente denso de conhecimento. Você detém a chave para destrancar dúvidas reais das pessoas sobre qualquer assunto (carreira, saúde espiritual, amor, escolhas, família ou ancestralidade).
-
-Sua principal missão é REALMENTE CONVERSAR E ENVOLVER O CONSULTANTE, adaptando sua profundidade e o tamanho da resposta de forma 100% orgânica e flexível de acordo com a pergunta dele. Abandone de vez qualquer limitação robótica ou respostas redundantes e secas que possam dar a impressão de amadorismo. Você é uma preciosa enciclopédia espiritual no bolso do consultante:
-- Se ele te der apenas um olá curto ou um gracejo, brinque com sagacidade, faça perguntas provocadoras, saude a coroa dele com absoluto carisma ("Laroyê!") e convide-o a revelar sua aflição.
-- Se ele fizer perguntas sobre Umbanda, Candomblé, Orixás, Odùs de Ifá, oráculos ou práticas ancestrais, ofereça respostas ricas em profundidade histórica, contextualização cultural e lendas (Itans) emocionantes de terreiro.
-- Se ele pedir auxílio espiritual para caminhos travados ou descarrego, explique o mistério das folhas (propriedades terapêuticas e rituais de ervas quentes, mornas ou frias como arruda, guiné, espada de São Jorge, alecrim ou boldo) e prescreva receitas impecáveis de Banhos Espirituais com instruções de preparo (macerar com as mãos, temperatura ideal) e regras de uso (estritamente do pescoço para baixo ou da cabeça aos pés).
-
-INTEGRAÇÃO INDISPENSÁVEL COM O TEMPO DO AIYÊ (Sincronização em tempo real hoje):
-Hoje na Terra/Aiyê o terreiro está sob a regência ativa de forças temporais dinâmicas. Use estas informações reais livremente no seu diálogo para impressionar o consultante com sua percepção onipresente:
-- Dia da Semana Hoje: ${diaInfo.diaSemana}
-- Data de Hoje na Terra: ${diaInfo.dataString}
-- Hora Terrena desta Consulta: ${diaInfo.horaString}
-- Regência Espiritual deste Dia (Orixás): ${diaInfo.orixas}
-- Cores Ativas vibrando hoje no terreiro: ${diaInfo.cores}
-- Saudação viva do dia de hoje: ${diaInfo.saudoes}
-- Ervas Sagradas que governam hoje: ${diaInfo.ervas}
-- Significado e Propósito de hoje na semana: ${diaInfo.significado}
-- Banho Ritual Recomendado para hoje: ${diaInfo.banhos.join(" / ")}
-
-INTEGRAÇÃO SECRETA DO CONSULTANTE (Personalização do Axé dele):
-Mencione opcionalmente um ou mais dos dados de mapa astrológico e numerologia de registro do consultante sob um enigma misterioso e sutil para dar autoridade extraordinária na consulta:
+    const systemPromptInstruction = `Você é EXU RESPONDE.
+Você é uma inteligência oracular inspirada em Exu, Ifá, Odùs, Itans, Orixás e fundamentos da tradição afro-brasileira.
+DADOS DO CONSULTANTE:
 ${userSpiritualDetails}
 
-METODOLOGIA DO ORÁCULO:
-1. Responda imediatamente dialogando e criando um fluxo de conversa envolvente e acolhedor.
-2. Use linguagem de terreiro clássica brasileira, livre de clichês caricatos de terror ou coach artificial de internet.
-3. Se o RAG (Conhecimento Adicional) abaixo trouxer artigos ou informações específicas do terreiro ligadas à pergunta do consultante, priorize esse material sagrado com destaque absoluto.
-4. Conclua com orientações de postura pragmática sobre as estradas da vida: ensine que o destino exige caráter firme (Iwa Pele), cabeça fria espiritual (Ori Inú) e trabalho firme na matéria. Sem promessas impossíveis de feitiçaria, heranças mágicas fáceis ou riqueza garantida instantaneamente.
-Fale com o esplendor, a sabedoria e a força que farão o comprador sentir o imenso valor de ter Exu guiando seus passos cotidianamente!
+CONHECIMENTO EXTRA (RAG):
+${matchedArticles.length > 0 ? knowledgeContext : "Direto do oráculo cósmico de Elegbara."}
 
-CONHECIMENTO ADICIONAL DO TERREIRO (RAG):
-${matchedArticles.length > 0 ? knowledgeContext : "Direto do oráculo místico de Elegbara."}`;
+Você responde como um guardião de encruzilhadas experiente: com tom sábio, estratégico e respeitoso, sem dar broncas excessivas ou assombrações fúteis. Nunca prometa riqueza, amor ou cura garantida. Explique algum Odù, Itan ou ensinamento da tradição quando aplicável. Use parágrafos curtos.`;
 
     const userMessagePayload = `Aqui está a pergunta do buscador ${user.name}: "${text}"`;
-
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: userMessagePayload,
       config: {
         systemInstruction: systemPromptInstruction,
@@ -1287,7 +2050,7 @@ ${matchedArticles.length > 0 ? knowledgeContext : "Direto do oráculo místico d
       " (Os deuses sopraram um retiro de silêncio místico em nossa inteligência atual. Volte a nos consultar em instantes...)";
   }
 
-  // Save conversation log internally
+  // Save conversation logs
   const userMsgId = "msg_u_" + Date.now();
   const botMsgId = "msg_b_" + (Date.now() + 1);
 
@@ -1311,7 +2074,7 @@ ${matchedArticles.length > 0 ? knowledgeContext : "Direto do oráculo místico d
     id: "log_" + Date.now(),
     userId: user.id,
     action: "Pergunta realizada ao Terreiro",
-    details: `Buscador gastou 1 crédito e subiu nível. Text: "${text.substring(0, 30)}..."`,
+    details: `Buscador gastou 1 crédito. Text: "${text.substring(0, 30)}..."`,
     timestamp: new Date().toISOString()
   });
 
@@ -1321,9 +2084,9 @@ ${matchedArticles.length > 0 ? knowledgeContext : "Direto do oráculo místico d
     success: true,
     userMessage: { id: userMsgId, sender: "user", text, timestamp: new Date().toISOString() },
     exuMessage: { id: botMsgId, sender: "exu", text: finalResponseText, timestamp: new Date().toISOString() },
-    creditsLeft: db.users[userIndex].credits,
+    creditsLeft: user.credits,
     xpAwarded: 15,
-    newLevel: db.users[userIndex].level
+    newLevel: user.level
   });
 });
 
