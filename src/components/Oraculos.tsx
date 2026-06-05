@@ -108,6 +108,7 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
       alert("Por favor, preencha sua data de nascimento.");
       return;
     }
+
     if (user.credits < 2) {
       openCreditsMenu();
       return;
@@ -131,6 +132,7 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
       });
 
       const data = await res.json();
+
       if (!res.ok) {
         throw new Error(data.error || "Erro cosmético de simetria nos cálculos.");
       }
@@ -146,7 +148,6 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
         birthDate: numBirthDate,
         birthName: numName
       });
-
     } catch (err: any) {
       alert(err.message || "Erro de oráculo.");
     } finally {
@@ -154,82 +155,56 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
     }
   };
 
-  // --- ASTROLOGY CALCULATE LOCAL ---
-  const triggerAstrologyLocal = () => {
+  // --- ASTROLOGY ORACLE TRIGGER ---
+  const triggerAstrologyLocal = async () => {
     const targetDate = astrologyBirthDate || user.birthDate;
+
     if (!targetDate) {
       setAstrologyError("Por favor, selecione sua data de nascimento.");
       return;
     }
+
     setAstrologyError("");
     setAstrologyLoading(true);
-    AudioEngine.playCrystalBell();
+    setAstrologyResult(null);
+    AudioEngine.playPortalSwoosh();
 
-    setTimeout(() => {
-      // Decode birthday sign and spiritual element
-      const dateParts = targetDate.split("-");
-      if (dateParts.length < 3) {
-        setAstrologyLoading(false);
-        return;
-      }
-      const month = parseInt(dateParts[1]);
-      const day = parseInt(dateParts[2]);
-
-      let sunSign = "Áries";
-      let element: "Fogo" | "Terra" | "Ar" | "Água" = "Fogo";
-      let rulingPlanet = "Marte";
-      let dominantHouse = 1;
-      let compatibility = "Sagitário, Leão, Libra";
-      let advice = "";
-
-      if ((month == 3 && day >= 21) || (month == 4 && day <= 19)) {
-        sunSign = "Áries"; element = "Fogo"; rulingPlanet = "Marte"; dominantHouse = 1;
-        advice = "Sua determinação está fervilhando. Exu pede prudência com as palavras e rapidez na execução de planos.";
-      } else if ((month == 4 && day >= 20) || (month == 5 && day <= 20)) {
-        sunSign = "Touro"; element = "Terra"; rulingPlanet = "Vênus"; dominantHouse = 2; compatibility = "Virgem, Capricórnio, Peixes";
-        advice = "A estabilidade e o plantio de sementes produtivas estão operando. Evite a preguiça espiritual; mova sua matéria.";
-      } else if ((month == 5 && day >= 21) || (month == 6 && day <= 20)) {
-        sunSign = "Gêmeos"; element = "Ar"; rulingPlanet = "Mercúrio"; dominantHouse = 3; compatibility = "Libra, Aquário, Áries";
-        advice = "As correntes do conhecimento ancestral guiam você. Ótimo ciclo para estudos profundos. Cuidado com dispersão.";
-      } else if ((month == 6 && day >= 21) || (month == 7 && day <= 22)) {
-        sunSign = "Câncer"; element = "Água"; rulingPlanet = "Lua"; dominantHouse = 4; compatibility = "Escorpião, Peixes, Touro";
-        advice = "A maré da intuição mística está elevadíssima. Ouça mais o seu coração e as preces silenciosas de proteção.";
-      } else if ((month == 7 && day >= 23) || (month == 8 && day <= 22)) {
-        sunSign = "Leão"; element = "Fogo"; rulingPlanet = "Sol"; dominantHouse = 5; compatibility = "Áries, Sagitário, Gêmeos";
-        advice = "O brilho do axé solar e sua energia de realeza dominam. Use essa autoridade para erguer os outros, livre de soberba.";
-      } else if ((month == 8 && day >= 23) || (month == 9 && day <= 22)) {
-        sunSign = "Virgem"; element = "Terra"; rulingPlanet = "Mercúrio"; dominantHouse = 6; compatibility = "Touro, Capricórnio, Câncer";
-        advice = "Organização sutil ajuda a moldar seus propósitos. Orixá Oxóssi indica caminhos prósperos nas decisões de longo prazo.";
-      } else if ((month == 9 && day >= 23) || (month == 10 && day <= 22)) {
-        sunSign = "Libra"; element = "Ar"; rulingPlanet = "Vênus"; dominantHouse = 7; compatibility = "Gêmeos, Aquário, Sagitário";
-        advice = "A balança da justiça cósmica ressoa em sua encruzilhada afetiva. Escolha o equilíbrio e rejeite dependências.";
-      } else if ((month == 10 && day >= 23) || (month == 11 && day <= 21)) {
-        sunSign = "Escorpião"; element = "Água"; rulingPlanet = "Plutão"; dominantHouse = 8; compatibility = "Câncer, Peixes, Virgem";
-        advice = "Poderosas forças de transmutação íntima estão agindo. Deixe morrer o que já feneceu para que o novo caminho nasça.";
-      } else if ((month == 11 && day >= 22) || (month == 12 && day <= 21)) {
-        sunSign = "Sagitário"; element = "Fogo"; rulingPlanet = "Júpiter"; dominantHouse = 9; compatibility = "Áries, Leão, Aquário";
-        advice = "Foco certeiro do caçador de caminhos. A busca por horizontes sagrados será vitoriosa sob a égide do conhecimento.";
-      } else if ((month == 12 && day >= 22) || (month == 1 && day <= 19)) {
-        sunSign = "Capricórnio"; element = "Terra"; rulingPlanet = "Saturno"; dominantHouse = 10; compatibility = "Touro, Virgem, Escorpião";
-        advice = "Sua escalada mística exige perseverança e bases morais limpas. Desfrute da solidez sem pressa ou angústia material.";
-      } else if ((month == 1 && day >= 20) || (month == 2 && day <= 18)) {
-        sunSign = "Aquário"; element = "Ar"; rulingPlanet = "Urano"; dominantHouse = 11; compatibility = "Gêmeos, Libra, Sagitário";
-        advice = "Inovação, quebra de paradigmas pesados. O oráculo sugere que seus ideais humanitários estão alinhados com o progresso.";
-      } else {
-        sunSign = "Peixes"; element = "Água"; rulingPlanet = "Netuno"; dominantHouse = 12; compatibility = "Câncer, Escorpião, Touro";
-        advice = "Os oceanos de Iemanjá trazem clareza silenciosa. Cuide de seu campo áurico e evite poços de melancolia passageira.";
-      }
-
-      setAstrologyResult({
-        sunSign, element, rulingPlanet, dominantHouse, compatibility, advice,
-        analysis: `O elemento reitor de sua coroa astral é ${element}. Isto dita que sua personalidade atua em sintonia com os ventos do planeta ${rulingPlanet}, influenciando o desenvolvimento de forças de conquista na Casa Astrológica ${dominantHouse}. Exu acompanha seus passos nesse quadrante sideral.`
+    try {
+      const res = await fetch("/api/oraculo/astrologia", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-id": user.id
+        },
+        body: JSON.stringify({
+          birthDate: targetDate
+        })
       });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Erro ao consultar astrologia ancestral.");
+      }
+
+      setAstrologyResult(data.details);
+      AudioEngine.playCrystalBell();
+
+      onUpdateUser({
+        ...user,
+        birthDate: targetDate
+      });
+    } catch (err: any) {
+      setAstrologyError(err.message || "Erro ao abrir o mapa astral ancestral.");
+    } finally {
       setAstrologyLoading(false);
-    }, 1200);
+    }
   };
 
   return (
-    <div id="oraculos_container" className="grid grid-cols-1 lg:grid-cols-4 gap-6 font-sans">
+
+    
+         <div id="oraculos_container" className="grid grid-cols-1 lg:grid-cols-4 gap-6 font-sans">
       
       {/* Sidebar Selector Navigation Column */}
       <div className="lg:col-span-1 flex flex-col gap-2.5">
@@ -409,12 +384,25 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
 
                             {/* REVERSE Side (Flipped Card Value) */}
                             <div className="absolute inset-x-0 inset-y-0 bg-gradient-to-t from-red-950/40 via-zinc-900 to-black border-2 border-yellow-400 rounded-xl [transform:rotateY(180deg)] [backface-visibility:hidden] p-3 flex flex-col justify-between items-center shadow-xl">
-                              <span className="text-yellow-400 font-mono text-xs font-bold uppercase">{card.reversed ? "⚠️ INVERTIDA" : "✦ NORMAL"}</span>
-                              <div className="text-4xl filter drop-shadow-[0_2px_10px_rgba(234,179,8,0.3)]">{card.symbol}</div>
-                              <div className="text-center">
-                                <h4 className="text-amber-100 font-bold text-xs tracking-wider line-clamp-1">{card.name}</h4>
-                                <span className="text-[9px] font-mono text-zinc-500">{card.arcana} arcano</span>
-                              </div>
+                              <span className="text-yellow-400 font-mono text-xs font-bold uppercase">
+  ✦ NORMAL
+</span>
+
+<div className="text-4xl filter drop-shadow-[0_2px_10px_rgba(234,179,8,0.3)]">
+  {card.arcano === "maior" ? "🔮" : "🃏"}
+</div>
+
+<div className="text-center">
+  <h4 className="text-amber-100 font-bold text-xs tracking-wider line-clamp-2">
+    {card.nome || card.name}
+  </h4>
+
+  <span className="text-[9px] font-mono text-zinc-500 uppercase">
+    {card.arcano === "maior"
+      ? "Arcano Maior"
+      : `Arcano Menor${card.grupo ? ` • ${card.grupo}` : ""}`}
+  </span>
+</div>
                             </div>
 
                           </div>
@@ -510,31 +498,39 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
                     <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 p-4 rounded-xl border border-yellow-500/10 text-center flex flex-col justify-center items-center shadow-md">
                       <span className="text-[9px] font-mono text-yellow-600 uppercase font-semibold tracking-wider">Caminho do Destino</span>
                       <span className="text-3xl font-extrabold text-yellow-400 font-mono my-1.5">{numResult.destinyNumber}</span>
-                      <small className="text-[9px] text-zinc-500 font-mono">Rota e encruzilhadas</small>
+                      <small className="text-[9px] text-zinc-500 font-mono">
+Missão desta encarnação
+</small>
                     </div>
 
                     <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 p-4 rounded-xl border border-yellow-500/10 text-center flex flex-col justify-center items-center shadow-md">
                       <span className="text-[9px] font-mono text-yellow-600 uppercase font-semibold tracking-wider">Número de Alma</span>
                       <span className="text-3xl font-extrabold text-yellow-400 font-mono my-1.5">{numResult.soulNumber}</span>
-                      <small className="text-[9px] text-zinc-500 font-mono">Desejos internos</small>
+                      <small className="text-[9px] text-zinc-500 font-mono">
+O que sua alma busca
+</small>
                     </div>
 
                     <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 p-4 rounded-xl border border-yellow-500/10 text-center flex flex-col justify-center items-center shadow-md">
                       <span className="text-[9px] font-mono text-yellow-600 uppercase font-semibold tracking-wider">Número de Expressão</span>
                       <span className="text-3xl font-extrabold text-yellow-400 font-mono my-1.5">{numResult.expressionNumber}</span>
-                      <small className="text-[9px] text-zinc-500 font-mono">Talentos latentes</small>
+                      <small className="text-[9px] text-zinc-500 font-mono">
+Forças naturais
+</small>
                     </div>
 
                     <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 p-4 rounded-xl border border-yellow-500/10 text-center flex flex-col justify-center items-center shadow-md">
                       <span className="text-[9px] font-mono text-yellow-600 uppercase font-semibold tracking-wider">Ano Pessoal</span>
                       <span className="text-3xl font-extrabold text-yellow-400 font-mono my-1.5">{numResult.personalYear}</span>
-                      <small className="text-[9px] text-zinc-500 font-mono">Ciclos para 2026</small>
+                      <small className="text-[9px] text-zinc-500 font-mono">
+Energia do ano atual
+</small>
                     </div>
                   </div>
 
                   {/* Interpretive text section */}
                   <div className="bg-black/60 border border-red-950/40 p-5 rounded-2xl select-text">
-                    <p className="text-[10px] font-mono tracking-widest text-yellow-500 uppercase font-bold mb-2">ANÁLISE DE ENERGIA EXU RESPONDE:</p>
+                    <p className="text-[10px] font-mono tracking-widest text-yellow-500 uppercase font-bold mb-2">LEITURA NUMEROLÓGICA DOS CAMINHOS:</p>
                     <div className="text-sm text-zinc-300 leading-relaxed space-y-3 whitespace-pre-wrap select-text selection:bg-red-900">
                       {numResult.analysis}
                     </div>

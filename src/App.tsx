@@ -20,24 +20,6 @@ import UserProfilePanel from "./components/UserProfile";
 import PremiumCredits from "./components/PremiumCredits";
 import AdminPanel from "./components/AdminPanel";
 
-// Library definitions maintained for modal viewing
-const LIBRARY_ODUS = [
-  { name: "Okaran Meji", number: 1, element: "Terra", vibe: "Agitação, caminhos difíceis mas com grande potencial de transmutação e superação." },
-  { name: "Eji Ogbe", number: 2, element: "Ar", vibe: "Luz absoluta, novos começos, conexões divinas de Ifá e proteção ancestral." },
-  { name: "Eta Ogunda", number: 3, element: "Fogo", vibe: "Justiça, lutas, conquistas materiais obtidas com coragem e determinação." },
-  { name: "Irosun Meji", number: 4, element: "Terra", vibe: "Estabilidade, necessidade de cautela, proteção contra armadilhas e traições." },
-  { name: "Obará Meji", number: 6, element: "Ar", vibe: "Prosperidade irresistível, ascensão material rápida e alegrias abundantes." },
-  { name: "Odia Meji", number: 7, element: "Água", vibe: "Mudança estrutural profunda, renascimento e eliminação de karmas antigos." }
-];
-
-const LIBRARY_EXUS = [
-  { title: "Exu Elegbara", role: "Senhor dos Cruzamentos", key: "Abre ou fecha os portais do destino material e espiritual imediato." },
-  { title: "Exu Tiriri", role: "Guardião da Ação Rápida", key: "Quebra correntes de inveja e dinamiza decisões profissionais bloqueadas." },
-  { title: "Exu Marabô", role: "Fidelidade e Diplomacia", key: "Cria acordos fortes e atrai parceiros prósperos nos negócios." },
-  { title: "Maria Padilha", role: "Rainha das Vibrações", key: "Trabalha o magnétismo pessoal, amor-próprio e soluções de afetividade." },
-  { title: "Exu Tranca Ruas", role: "Proteção de Defesa", key: "Muralha contra demandas, isola perigos físicos e mentais de sabotagem." }
-];
-
 export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [checkedAuth, setCheckedAuth] = useState(false);
@@ -57,29 +39,8 @@ export default function App() {
 
   // Load user session
   useEffect(() => {
-    const cachedUserId = localStorage.getItem("exu_user_id");
-    const cachedEmail = localStorage.getItem("exu_user_email");
-
-    if (cachedUserId && cachedEmail) {
-  const cachedUser = {
-    id: cachedUserId,
-    uid: cachedUserId,
-    email: cachedEmail,
-    name: cachedEmail === "brasilportalvip@gmail.com" ? "Admin" : "Buscador",
-    role: cachedEmail === "brasilportalvip@gmail.com" ? "admin" : "user",
-    credits: cachedEmail === "brasilportalvip@gmail.com" ? 999 : 7,
-    xp: 0,
-    level: cachedEmail === "brasilportalvip@gmail.com" ? "Mestre dos Caminhos" : "Buscador"
-  } as any;
-
-  setUser(cachedUser);
-  setDefaultGreeting(cachedUser);
   setCheckedAuth(true);
-} else {
-  setCheckedAuth(true);
-}
-
-  }, []);
+}, []);
 
   // Set default initial greeting if chat is fresh
   const setDefaultGreeting = (currentUser: UserProfile) => {
@@ -88,7 +49,7 @@ export default function App() {
         id: "exu_welcome",
         userId: currentUser.id,
         sender: "exu",
-        text: `Sou Exu Responde. Os caminhos não estão escritos. Eles são construídos pelas escolhas, pela consciência e pelo movimento. Laroyé, ${currentUser.name}! Traga suas inquirições, caminhos de prosperidade, amor ou espiritualidade e cruzaremos as chaves astrológicas para abrir seus portais de clareza.`,
+text: `Bem Vindo Ao Reino De Exu! Faça Sua Pergunta.`,
         timestamp: new Date().toISOString()
       }
     ]);
@@ -494,7 +455,7 @@ export default function App() {
         </h1>
 
         <p className="mt-2 text-center text-xs sm:text-sm max-w-xl text-zinc-400 tracking-wide font-medium leading-relaxed">
-          O que posso ajudar?
+          Em que posso ajudar?
         </p>
 
         {/* CHAT ESTILO GPT */}

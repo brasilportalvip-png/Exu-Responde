@@ -109,7 +109,13 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
         id: "err_temp_" + Date.now(),
         userId: user.id,
         sender: "exu",
-        text: `⚠️ Alerta espiritual: ${err.message || 'Houve uma oscilação na ponte cósmica. Seus créditos foram preservados no terreiro.'}`,
+     text: `⚠️ Alerta espiritual: ${
+  typeof err?.message === "string"
+    ? err.message
+    : typeof err === "string"
+      ? err
+      : "Houve uma oscilação na ponte cósmica. Seus créditos foram preservados no terreiro."
+}`,
         timestamp: new Date().toISOString()
       };
       setMessages(prev => [...prev, errorMsg]);
