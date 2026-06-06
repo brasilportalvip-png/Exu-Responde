@@ -594,6 +594,22 @@ text: `Bem Vindo Ao Reino De Exu! Faça Sua Pergunta.`,
                 <span className="truncate">RECARGA (+AXÉ)</span>
               </button>
 
+<button
+  type="button"
+  onClick={() => {
+    AudioEngine.playCrystalBell();
+    window.open(
+      "https://chat.whatsapp.com/Lo8Tu80EZArLcZAHF5YfIu",
+      "_blank"
+    );
+  }}
+  className="w-full sm:flex-1 px-1.5 py-2.5 rounded-xl bg-zinc-950 hover:bg-green-950/20 border border-zinc-900 hover:border-green-500/30 text-[10px] sm:text-xs font-mono font-bold inline-flex items-center justify-center gap-1 sm:gap-1.5 cursor-pointer text-green-400 transition-all"
+>
+  <HelpCircle className="w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0" />
+  <span className="truncate">SUPORTE</span>
+</button>
+
+
               {user.role === "admin" && (
                 <button
                   type="button"
