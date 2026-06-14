@@ -10,8 +10,8 @@ interface PremiumCreditsProps {
 }
 
 const CREDIT_PLANS: CreditPlan[] = [
-  { id: "plan_prata", name: "Plano Prata", price: 49.0, credits: 100, bonus: 0, color: "from-zinc-700 to-zinc-900" },
-  { id: "plan_ouro", name: "Plano Ouro", price: 120.0, credits: 300, bonus: 0, popular: true, color: "from-yellow-700 via-yellow-600 to-amber-950" }
+  { id: "plan_prata", name: "Plano Prata", price: 49.0, credits: 50, bonus: 0, color: "from-zinc-700 to-zinc-900" },
+  { id: "plan_ouro", name: "Plano Ouro", price: 120.0, credits: 125, bonus: 0, popular: true, color: "from-yellow-700 via-yellow-600 to-amber-950" }
 ];
 
 export default function PremiumCredits({ user }: PremiumCreditsProps) {

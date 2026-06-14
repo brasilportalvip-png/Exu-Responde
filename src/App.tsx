@@ -151,16 +151,25 @@ text: `Bem Vindo Ao Reino De Exu! Faça Sua Pergunta.`,
         throw new Error(data.error || "Ocorreu uma falha ao abrir a comunicação celestial.");
       }
 
-      // Add Exu reaction message
-      setMessages(prev => [...prev, data.exuMessage]);
+      const xpAwarded = Number(data.xpAwarded || 0);
+const creditCharged = Math.max(0, Number(user.credits || 0) - Number(data.creditsLeft || 0));
 
-      // Deduct client credit / add XP
-      setUser({
-        ...user,
-        credits: data.creditsLeft,
-        xp: user.xp + (data.xpAwarded || 15),
-        level: data.newLevel
-      });
+const exuMessageWithMeta: ChatMessage = {
+  ...data.exuMessage,
+  xpAwarded,
+  creditCharged
+};
+
+// Add Exu reaction message
+setMessages(prev => [...prev, exuMessageWithMeta]);
+
+// Update client user
+setUser({
+  ...user,
+  credits: data.creditsLeft,
+  xp: user.xp + xpAwarded,
+  level: data.newLevel
+});
 
     } catch (err: any) {
       setMessages(prev => [
@@ -520,12 +529,31 @@ text: `Bem Vindo Ao Reino De Exu! Faça Sua Pergunta.`,
                       {/* Info line */}
                       <div className="mt-2 text-[8px] font-mono text-zinc-500 uppercase tracking-widest flex items-center justify-end gap-1.5 selection:bg-transparent">
                         <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                        {msg.id !== "exu_welcome" && (
-                          <>
-                            <span>•</span>
-                            <span className="text-yellow-500 font-bold">{isExu ? "-1 CRÉDITO AXÉ" : "+15 XP"}</span>
-                          </>
-                        )}
+                        
+
+{msg.id !== "exu_welcome" && isExu && (
+  <>
+    {Number(msg.xpAwarded || 0) > 0 && (
+      <>
+        <span>•</span>
+        <span className="text-yellow-500 font-bold">
+          +{msg.xpAwarded} XP
+        </span>
+      </>
+    )}
+
+    {Number(msg.creditCharged || 0) > 0 && (
+      <>
+        <span>•</span>
+        <span className="text-yellow-500 font-bold">
+          -{msg.creditCharged} CRÉDITO AXÉ
+        </span>
+      </>
+    )}
+  </>
+)}
+
+
                       </div>
                     </div>
                   </div>

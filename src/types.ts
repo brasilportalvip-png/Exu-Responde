@@ -58,6 +58,8 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   isFavorite?: boolean;
+  xpAwarded?: number;
+  creditCharged?: number;
 }
 
 export interface KnowledgeItem {

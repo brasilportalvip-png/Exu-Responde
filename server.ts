@@ -1721,8 +1721,7 @@ if (hasSameIpSession) fraudReasons.push("same_ip_and_session");
 if (tooManyRecentIpAccounts) fraudReasons.push("too_many_recent_accounts_same_ip");
 
 const creditsBlocked = fraudReasons.length > 0;
-const initialCredits = creditsBlocked ? 0 : 7;
-
+const initialCredits = creditsBlocked ? 0 : 5;
 
     // Generate spiritual details
   const spiritualProps = calculateSpiritualProfile(birthName, birthDate, birthTime, placeToUseSubmit);
@@ -1833,7 +1832,7 @@ Importante: Termine obrigatoriamente com a seguinte declaração em caixa ou cai
 
     try {
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     contents: prompt,
     config: {
       systemInstruction:
@@ -1848,7 +1847,7 @@ Importante: Termine obrigatoriamente com a seguinte declaração em caixa ou cai
   console.error("Gemini Flash failed in Tarot, trying Flash Lite:", flashErr);
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-lite",
+    model: "gemini-3.1-flash-lite",
     contents: prompt,
     config: {
       systemInstruction:
@@ -2442,7 +2441,7 @@ let response;
 
 try {
   response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     contents: prompt,
     config: {
       systemInstruction:
@@ -2455,7 +2454,7 @@ try {
 
   try {
     response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-lite",
+      model: "gemini-3.1-flash-lite",
       contents: prompt,
       config: {
         systemInstruction:
@@ -2619,7 +2618,7 @@ FORMATO:
 
 try {
   response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     contents: prompt,
     config: {
       systemInstruction: "...",
@@ -2630,7 +2629,7 @@ try {
   console.error("Numerologia Flash failed:", flashErr);
 
   response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-lite",
+    model: "gemini-3.1-flash-lite",
     contents: prompt,
     config: {
       systemInstruction: "...",
@@ -2688,6 +2687,64 @@ app.post("/api/oraculo/astrologia", async (req, res) => {
     ...userDoc.data()
   } as any;
 
+
+if (isOnlySocialMessage) {
+  const userMsgId = "msg_u_" + Date.now();
+  const botMsgId = "msg_b_" + (Date.now() + 1);
+
+  let quickText = "Salve. Você chegou até mim, mas ainda não disse o que procura. É amor, dinheiro, caminho ou resposta espiritual?";
+
+  if (normalizedText.includes("bom dia")) {
+    quickText = "Bom dia. Que seus caminhos se abram com firmeza, clareza e proteção. Diga, o que você busca hoje?";
+  } else if (normalizedText.includes("boa tarde")) {
+    quickText = "Boa tarde. A tarde traz movimento, escolha e consequência. Diga, qual caminho você quer olhar agora?";
+  } else if (normalizedText.includes("boa noite")) {
+    quickText = "Boa noite. Que a noite aquiete sua mente e revele o que estava escondido. O que pesa no seu pensamento?";
+  } else if (isAskingWell) {
+    quickText = "Estou firme na encruzilhada. Os caminhos se movem, as respostas chegam no tempo certo. E você, como está por dentro?";
+  } else if (isThanks) {
+    quickText = "Recebo sua gratidão. Caminho bom também se firma com respeito. Quando precisar, volte e pergunte.";
+  } else if (isGoodbye) {
+    quickText = "Siga em paz. Que seus caminhos fiquem abertos e sua cabeça firme. Quando precisar, volte à encruzilhada.";
+  }
+
+  db.messages.push({
+    id: userMsgId,
+    userId: user.id,
+    sender: "user",
+    text,
+    timestamp: new Date().toISOString()
+  });
+
+  db.messages.push({
+    id: botMsgId,
+    userId: user.id,
+    sender: "exu",
+    text: quickText,
+    timestamp: new Date().toISOString()
+  });
+
+  return res.json({
+    success: true,
+    userMessage: {
+      id: userMsgId,
+      sender: "user",
+      text,
+      timestamp: new Date().toISOString()
+    },
+    exuMessage: {
+      id: botMsgId,
+      sender: "exu",
+      text: quickText,
+      timestamp: new Date().toISOString()
+    },
+    creditsLeft: user.credits,
+    xpAwarded: 0,
+    newLevel: user.level
+  });
+}
+
+
   const birthDate = req.body.birthDate || user.birthDate;
 
   if (!birthDate) {
@@ -2738,7 +2795,7 @@ Fale como Exu lendo os astros, os caminhos e o perfil espiritual.
 
     try {
       response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.5-flash",
         contents: prompt,
         config: {
           systemInstruction: "Você é Exu realizando leitura de Astrologia Ancestral.",
@@ -2750,7 +2807,7 @@ Fale como Exu lendo os astros, os caminhos e o perfil espiritual.
 
       try {
         response = await ai.models.generateContent({
-          model: "gemini-2.5-flash-lite",
+          model: "gemini-3.1-flash-lite",
           contents: prompt,
           config: {
             systemInstruction: "Você é Exu realizando leitura de Astrologia Ancestral.",
@@ -2804,17 +2861,17 @@ if (!String(userId).startsWith("usr_")) {
 }
 
   const plans: Record<string, any> = {
-    prata: {
-      title: "Plano Prata",
-      price: 49.0,
-      credits: 100
-    },
-    ouro: {
-      title: "Plano Ouro",
-      price: 120.0,
-      credits: 300
-    }
-  };
+  prata: {
+    title: "Plano Prata",
+    price: 49.0,
+    credits: 50
+  },
+  ouro: {
+    title: "Plano Ouro",
+    price: 120.0,
+    credits: 125
+  }
+};
 
   const normalizedPlanId =
   planId === "plan_prata" ? "prata" :
@@ -3174,31 +3231,26 @@ const userRequestTimestamps: Record<string, number[]> = {};
 // Simulated RAG and Main Chat Executor API (Proxying Gemini Server-Side)
 app.post("/api/exu/chat", async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
-  const { text } = req.body;
 
-  if (!userId) return res.status(400).json({ error: "Usuário é obrigatório." });
-  if (!text || text.trim() === "") {
-    return res.status(400).json({ error: "Por favor, digite sua consulta mental ao terreiro de Exu." });
-  }
+  
 
-  // Rate Limiting anti-abuse implementation (Max 3 questions per minute)
-  const now = Date.now();
-  if (!userRequestTimestamps[userId]) {
-    userRequestTimestamps[userId] = [];
-  }
-  userRequestTimestamps[userId] = userRequestTimestamps[userId].filter(t => now - t < 60000);
-  if (userRequestTimestamps[userId].length >= 3) {
-    return res.status(429).json({ error: "⚠️ Calma, peregrino! As correntes místicas do terreiro estão muito agitadas. Aguarde um minuto para que Exu possa processar suas indagações com o equilíbrio necessário." });
-  }
-  userRequestTimestamps[userId].push(now);
+const { text } = req.body;
 
- const db = loadDb();
+if (!userId) {
+  return res.status(401).json({ error: "Sessão não identificada." });
+}
 
-const userRef = firestore.collection("users").doc(userId);
+if (!text || !String(text).trim()) {
+  return res.status(400).json({ error: "Digite uma mensagem para consultar Exu." });
+}
+
+const db = loadDb();
+
+const userRef = firestore.collection("users").doc(String(userId));
 const userDoc = await userRef.get();
 
 if (!userDoc.exists) {
-  return res.status(404).json({ error: "Buscador não encontrado na rede astral para este portal." });
+  return res.status(404).json({ error: "Buscador não encontrado." });
 }
 
 const user = {
@@ -3206,25 +3258,111 @@ const user = {
   ...userDoc.data()
 } as any;
 
+const normalizedText = String(text || "")
+  .normalize("NFD")
+  .replace(/[\u0300-\u036f]/g, "")
+  .toLowerCase()
+  .trim();
+
+const isGreeting =
+  /^(oi|ola|salve|bom dia|boa tarde|boa noite)(\s|,|!|\?|\.|$)/i.test(normalizedText);
+
+const isThanks =
+  /^(obrigado|obrigada|gratidao|valeu)(\s|,|!|\?|\.|$)/i.test(normalizedText);
+
+const isGoodbye =
+  /^(tchau|ate mais|ate logo|falou)(\s|,|!|\?|\.|$)/i.test(normalizedText);
+
+const isAskingWell =
+  /^(tudo bem|tudo bom|como vai|como voce esta|como vc esta|voce esta bem|vc esta bem)[\s\?\!\.]*$/i.test(normalizedText);
+
+
+
+const isOnlySocialMessage =
+  isGreeting ||
+  isThanks ||
+  isGoodbye ||
+  isAskingWell;
+
+if (isOnlySocialMessage) {
+  const quickText = isGreeting
+    ? "Laroyê, meu filho. Exu está na porteira. Diga o que pesa no seu caminho."
+    : isAskingWell
+      ? "Exu está firme, observando os caminhos. E você, meu filho, o que traz nessa encruzilhada?"
+      : isThanks
+        ? "Recebo sua gratidão. Que seus caminhos sigam com firmeza, respeito e axé."
+        : "Vá com firmeza. Quando precisar, volte à porteira e chame por Exu.";
+
+  const now = new Date().toISOString();
+  const userMsgId = "msg_u_" + Date.now();
+  const botMsgId = "msg_b_" + (Date.now() + 1);
+
+  db.messages.push({
+    id: userMsgId,
+    userId: user.id,
+    sender: "user",
+    text,
+    timestamp: now
+  });
+
+  db.messages.push({
+    id: botMsgId,
+    userId: user.id,
+    sender: "exu",
+    text: quickText,
+    timestamp: now
+  });
+
+  saveDb(db);
+
+  return res.json({
+    success: true,
+    userMessage: {
+      id: userMsgId,
+      sender: "user",
+      text,
+      timestamp: now
+    },
+    exuMessage: {
+      id: botMsgId,
+      sender: "exu",
+      text: quickText,
+      timestamp: now
+    },
+    creditsLeft: user.credits,
+    xpAwarded: 0,
+    newLevel: user.level
+  });
+}
+
+
+
+const shouldChargeCredit = !isOnlySocialMessage;
+
 // Validate Credits
-if (Number(user.credits || 0) < 1) {
-  return res.status(400).json({ error: "Seus créditos de Axé acabaram. Adquira mais créditos para continuar sua jornada de questionamento." });
+if (shouldChargeCredit && Number(user.credits || 0) < 1) {
+  return res.status(400).json({
+    error: "Seus créditos de Axé acabaram. Adquira mais créditos para continuar sua jornada de questionamento."
+  });
 }
 
 // Deduct Credit & Award XP
-const newCredits = Number(user.credits || 0) - 1;
-const newXp = Number(user.xp || 0) + 15;
-const { level } = checkXpLevel(newXp);
+if (shouldChargeCredit) {
+  const newCredits = Number(user.credits || 0) - 1;
+  const newXp = Number(user.xp || 0) + 15;
+  const { level } = checkXpLevel(newXp);
 
-await userRef.update({
-  credits: newCredits,
-  xp: newXp,
-  level
-});
+  await userRef.update({
+    credits: newCredits,
+    xp: newXp,
+    level
+  });
 
-user.credits = newCredits;
-user.xp = newXp;
-user.level = level;
+  user.credits = newCredits;
+  user.xp = newXp;
+  user.level = level;
+}
+
 
 
 // Compatibilidade entre pessoas pelo chat
@@ -3448,7 +3586,7 @@ if (compatibilityData) {
     userMessage: { id: userMsgId, sender: "user", text, timestamp: new Date().toISOString() },
     exuMessage: { id: botMsgId, sender: "exu", text: finalResponseText, timestamp: new Date().toISOString() },
     creditsLeft: user.credits,
-    xpAwarded: 15,
+    xpAwarded: shouldChargeCredit ? 15 : 0,
     newLevel: user.level
   });
 }
@@ -3668,6 +3806,18 @@ Sua missão é fazer o consulente sentir:
 "Exu entendeu minha pergunta."
 "Exu falou comigo."
 "Existe uma presença do outro lado."
+
+
+IMPORTANTE SOBRE TAMANHO DA RESPOSTA:
+
+- Responda entre 250 e 600 palavras.
+- Se a pergunta for simples, responda curto.
+- Não faça texto gigante sem necessidade.
+- Não repita a mesma ideia com outras palavras.
+- Não transforme consulta em artigo.
+- Fale como presença espiritual conversando, não como relatório.
+
+
 
 DADOS DO CONSULENTE:
 ${userSpiritualDetails}
@@ -3986,7 +4136,7 @@ let response;
 
 try {
   response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     contents: userMessagePayload,
     config: {
       systemInstruction: systemPromptInstruction,
@@ -3994,11 +4144,11 @@ try {
     }
   });
 } catch (flashErr) {
-  console.error("Gemini 2.5 Flash failed, trying Flash Lite:", flashErr);
+  console.error("Gemini 3.5 Flash failed, trying Flash Lite:", flashErr);
 
   try {
     response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-lite",
+      model: "gemini-3.1-flash-lite",
       contents: userMessagePayload,
       config: {
         systemInstruction: systemPromptInstruction,
@@ -4006,7 +4156,7 @@ try {
       }
     });
   } catch (liteErr) {
-    console.error("Gemini 2.5 Flash Lite failed:", liteErr);
+    console.error("Gemini 3.5 Flash Lite failed:", liteErr);
 
     response = {
       text: TEMPLE_FALLBACKS[
