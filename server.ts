@@ -30,15 +30,73 @@ const mp = new MercadoPagoConfig({
   accessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN || ""
 });
 
+
+
+
+
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
 
+
+// ======================================================
+// FIREBASE AUTH — VALIDAÇÃO SEGURA DO USUÁRIO
+// ======================================================
+
+async function requireFirebaseAuth(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({
+      error: "Sessão Firebase não identificada."
+    });
+  }
+
+  const idToken = authHeader.slice(7).trim();
+
+  if (!idToken) {
+    return res.status(401).json({
+      error: "Token Firebase não informado."
+    });
+  }
+
+  try {
+    const decodedToken = await admin
+      .auth()
+      .verifyIdToken(idToken);
+
+    (req as any).firebaseUser = decodedToken;
+
+    return next();
+
+  } catch (error) {
+    console.error(
+      "[AUTH] Token Firebase inválido:",
+      error
+    );
+
+    return res.status(401).json({
+      error:
+        "Sua sessão é inválida ou expirou. Entre novamente."
+    });
+  }
+}
+
+
 // In-Memory & Local persistent file DB path
 const DB_FILE = process.env.VERCEL
   ? "/tmp/db.json"
   : path.join(process.cwd(), "db.json");
+
+
+
+
+
 
 // Helper to lazy-initialize the Gemini client
 let geminiClientCache: GoogleGenAI | null = null;
@@ -1833,27 +1891,71 @@ Mas quando a pessoa enxerga a própria chave, a porta deixa de parecer parede.
 
 
 // Auth API - Register
-app.post("/api/auth/register", async (req, res) => {
-  const { 
-    birthName, birthDate, birthTime, birthPlace, email, password,
-    deviceId, browser, session, captchaAnswer, honeypot 
-  } = req.body;
-  
-  // Protect against automated scripts / bots using Honeypot
-  if (honeypot) {
-    return res.status(400).json({ error: "Atividade de automação suspeita detectada (Honeypot). Cadastro bloqueado." });
-  }
+app.post(
+  "/api/auth/register",
+  requireFirebaseAuth,
+  async (req, res) => {
+    const {
+      birthName,
+      birthDate,
+      birthTime,
+      birthPlace,
+      email,
+      deviceId,
+      browser,
+      session,
+      captchaAnswer,
+      honeypot
+    } = req.body;
 
-  // Protect using mathematical and anti-bot verification questions
-  if (!captchaAnswer || parseInt(captchaAnswer) !== 7) {
-    return res.status(400).json({ error: "Resposta do desafio anti-bot incorreta. Quanto é 4 + 3?" });
-  }
+    const firebaseUser = (req as any).firebaseUser as admin.auth.DecodedIdToken;
 
-  const placeToUseSubmit = birthPlace || "Não informada";
+    const firebaseEmail =
+      typeof firebaseUser?.email === "string"
+        ? firebaseUser.email.trim().toLowerCase()
+        : "";
 
-  if (!email || !password || !birthName || !birthDate) {
-    return res.status(400).json({ error: "Faltam campos obrigatórios no cadastro sagrado." });
-  }
+    const submittedEmail =
+      typeof email === "string"
+        ? email.trim().toLowerCase()
+        : "";
+
+    if (!firebaseUser?.uid || !firebaseEmail) {
+      return res.status(401).json({
+        error: "A identidade Firebase deste cadastro não pôde ser validada."
+      });
+    }
+
+    if (honeypot) {
+      return res.status(400).json({
+        error:
+          "Atividade de automação suspeita detectada (Honeypot). Cadastro bloqueado."
+      });
+    }
+
+    if (!captchaAnswer || parseInt(captchaAnswer) !== 7) {
+      return res.status(400).json({
+        error:
+          "Resposta do desafio anti-bot incorreta. Quanto é 4 + 3?"
+      });
+    }
+
+    const placeToUseSubmit =
+      birthPlace || "Não informada";
+
+    if (!submittedEmail || !birthName || !birthDate) {
+      return res.status(400).json({
+        error:
+          "Faltam campos obrigatórios no cadastro sagrado."
+      });
+    }
+
+    if (submittedEmail !== firebaseEmail) {
+      return res.status(403).json({
+        error:
+          "O e-mail informado não corresponde à identidade autenticada no Firebase."
+      });
+    }
 
 const db = loadDb();
 
@@ -1934,11 +2036,16 @@ const initialCredits = creditsBlocked ? 0 : 5;
   const spiritualProps = calculateSpiritualProfile(birthName, birthDate, birthTime, placeToUseSubmit);
   const cleanFirstName = birthName.split(" ")[0];
 
+  
+
+
   const newUser = {
     id: "usr_" + Math.random().toString(36).substring(2, 11),
-    email: email.toLowerCase(),
-    password: password,
-    name: cleanFirstName.charAt(0).toUpperCase() + cleanFirstName.slice(1).toLowerCase(),
+    firebaseUid: firebaseUser.uid,
+    email: normalizedEmail,
+    name:
+      cleanFirstName.charAt(0).toUpperCase() +
+      cleanFirstName.slice(1).toLowerCase(),
     birthName,
     birthDate,
     birthTime: birthTime || "",
@@ -1948,23 +2055,31 @@ const initialCredits = creditsBlocked ? 0 : 5;
     xp: 0,
     credits: initialCredits,
     promotionalCreditsBlocked: creditsBlocked,
-    avatarSeed: "eleg_seed_" + Math.floor(Math.random() * 9999),
+    avatarSeed:
+      "eleg_seed_" + Math.floor(Math.random() * 9999),
     createdAt: new Date().toISOString(),
     ip: clientIp,
     deviceId: deviceId || "dev_not_tracked",
     browser: browser || "unknown",
     sessionSign: session || "unknown",
-    emailVerified: true,
+    emailVerified: Boolean(firebaseUser.email_verified),
     ...spiritualProps
   };
 
   db.users.push(newUser);
-await firestore.collection("users").doc(newUser.id).set({
-  ...newUser,
-  password: "",
-  createdAt: new Date().toISOString(),
-  fraudReasons
-});
+
+  await firestore
+    .collection("users")
+    .doc(newUser.id)
+    .set({
+      ...newUser,
+      createdAt: new Date().toISOString(),
+      fraudReasons
+    });
+
+
+
+
 
 await firestore.collection("security_logs").add({
   type: "register_attempt",
@@ -2122,115 +2237,354 @@ readingReport = fixPortugueseEncoding(aiInterpretation);
   res.json({ success: true, user: newUser });
 });
 
+
+
+
 // Auth API - Login
-app.post("/api/auth/login", async (req, res) => {
-  const { email } = req.body;
+app.post(
+  "/api/auth/login",
+  requireFirebaseAuth,
+  async (req, res) => {
+    const firebaseUser =
+      (req as any).firebaseUser as admin.auth.DecodedIdToken;
 
-  if (!email) {
-    return res.status(400).json({ error: "E-mail é obrigatório." });
-  }
+    const firebaseEmail =
+      typeof firebaseUser?.email === "string"
+        ? firebaseUser.email.trim().toLowerCase()
+        : "";
 
-  const snapshot = await firestore
-    .collection("users")
-    .where("email", "==", email.toLowerCase())
-    .limit(1)
-    .get();
-
-  if (snapshot.empty) {
-    return res.status(404).json({ error: "Este buscador não está cadastrado." });
-  }
-
-  const doc = snapshot.docs[0];
-
-  res.json({
-    success: true,
-    user: {
-      id: doc.id,
-      ...doc.data()
+    if (!firebaseUser?.uid || !firebaseEmail) {
+      return res.status(401).json({
+        error: "A identidade Firebase não pôde ser validada."
+      });
     }
-  });
-});
+
+    if (!firebaseUser.email_verified) {
+      return res.status(403).json({
+        error:
+          "Confirme seu e-mail antes de entrar no portal."
+      });
+    }
+
+    const submittedEmail =
+      typeof req.body?.email === "string"
+        ? req.body.email.trim().toLowerCase()
+        : "";
+
+    if (
+      submittedEmail &&
+      submittedEmail !== firebaseEmail
+    ) {
+      return res.status(403).json({
+        error:
+          "O e-mail informado não corresponde à sessão autenticada."
+      });
+    }
+
+    const snapshot = await firestore
+      .collection("users")
+      .where("email", "==", firebaseEmail)
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(404).json({
+        error:
+          "Este buscador não está cadastrado no portal."
+      });
+    }
+
+    const doc = snapshot.docs[0];
+    const userData = doc.data() as any;
+
+    // Conta antiga ainda sem vínculo Firebase:
+    // vincula com segurança usando o token autenticado.
+    if (!userData.firebaseUid) {
+      await doc.ref.set(
+        {
+          firebaseUid: firebaseUser.uid,
+          emailVerified: true,
+          updatedAt: new Date().toISOString()
+        },
+        { merge: true }
+      );
+
+    } else if (userData.firebaseUid !== firebaseUser.uid) {
+      return res.status(403).json({
+        error:
+          "Esta conta está vinculada a outra identidade Firebase."
+      });
+    }
+
+    const refreshedDoc = await doc.ref.get();
+
+    return res.json({
+      success: true,
+      user: {
+        id: refreshedDoc.id,
+        ...refreshedDoc.data()
+      }
+    });
+  }
+);
+
+
+
+
 
 // Load Current Profile
-app.get("/api/user/profile", async (req, res) => {
-  const userId = req.headers["x-user-id"] as string;
-  if (!userId) return res.status(401).json({ error: "Sessão não identificada." });
+app.get(
+  "/api/user/profile",
+  requireFirebaseAuth,
+  async (req, res) => {
+    const firebaseUser =
+      (req as any).firebaseUser as admin.auth.DecodedIdToken;
 
-  const userDoc = await firestore.collection("users").doc(userId).get();
+    const firebaseEmail =
+      typeof firebaseUser?.email === "string"
+        ? firebaseUser.email.trim().toLowerCase()
+        : "";
 
-  if (!userDoc.exists) {
-    return res.status(404).json({ error: "Buscador não encontrado." });
+    if (!firebaseUser?.uid || !firebaseEmail) {
+      return res.status(401).json({
+        error: "A identidade Firebase não pôde ser validada."
+      });
+    }
+
+    // Primeiro procura pelo vínculo seguro com Firebase UID
+    let snapshot = await firestore
+      .collection("users")
+      .where("firebaseUid", "==", firebaseUser.uid)
+      .limit(1)
+      .get();
+
+    // Compatibilidade com contas antigas ainda não migradas
+    if (snapshot.empty) {
+      snapshot = await firestore
+        .collection("users")
+        .where("email", "==", firebaseEmail)
+        .limit(1)
+        .get();
+    }
+
+    if (snapshot.empty) {
+      return res.status(404).json({
+        error: "Buscador não encontrado."
+      });
+    }
+
+    const userDoc = snapshot.docs[0];
+    const userData = userDoc.data() as any;
+
+    if (
+      userData.firebaseUid &&
+      userData.firebaseUid !== firebaseUser.uid
+    ) {
+      return res.status(403).json({
+        error:
+          "Esta conta está vinculada a outra identidade Firebase."
+      });
+    }
+
+    // Migra conta antiga para o Firebase UID atual
+    if (!userData.firebaseUid) {
+      await userDoc.ref.set(
+        {
+          firebaseUid: firebaseUser.uid,
+          emailVerified: Boolean(firebaseUser.email_verified),
+          updatedAt: new Date().toISOString()
+        },
+        { merge: true }
+      );
+    }
+
+    const db = loadDb();
+
+    const chats = Array.isArray(db.messages)
+      ? db.messages
+          .filter(
+            (message: any) =>
+              message.userId === userDoc.id
+          )
+          .sort(
+            (a: any, b: any) =>
+              new Date(a.timestamp || 0).getTime() -
+              new Date(b.timestamp || 0).getTime()
+          )
+      : [];
+
+    const refreshedUserDoc =
+      await userDoc.ref.get();
+
+    return res.json({
+      user: {
+        id: refreshedUserDoc.id,
+        ...refreshedUserDoc.data()
+      },
+      chats
+    });
   }
+);
 
 
-  return res.json({
-    user: {
-      id: userDoc.id,
-      ...userDoc.data(),
-    },
-    chats: [],
-  });
-
-
-
-  
-});
 
 
 // Update Birth details
-app.post("/api/user/update", async (req, res) => {
-  const userId = req.headers["x-user-id"] as string;
-  const { birthName, birthDate, birthTime, birthPlace, name } = req.body;
+app.post(
+  "/api/user/update",
+  requireFirebaseAuth,
+  async (req, res) => {
+    const firebaseUser =
+      (req as any).firebaseUser as admin.auth.DecodedIdToken;
 
-  if (!userId) return res.status(401).json({ error: "Sessão inválida" });
+    const {
+      birthName,
+      birthDate,
+      birthTime,
+      birthPlace,
+      name
+    } = req.body;
 
-  const userDocRef = firestore.collection("users").doc(userId);
-  const userDoc = await userDocRef.get();
+    if (!firebaseUser?.uid) {
+      return res.status(401).json({
+        error: "Sessão Firebase inválida."
+      });
+    }
 
-  if (!userDoc.exists) {
-    return res.status(404).json({ error: "Usuário não encontrado." });
+    let snapshot = await firestore
+      .collection("users")
+      .where("firebaseUid", "==", firebaseUser.uid)
+      .limit(1)
+      .get();
+
+    // Compatibilidade com contas antigas
+    if (
+      snapshot.empty &&
+      typeof firebaseUser.email === "string"
+    ) {
+      snapshot = await firestore
+        .collection("users")
+        .where(
+          "email",
+          "==",
+          firebaseUser.email.trim().toLowerCase()
+        )
+        .limit(1)
+        .get();
+    }
+
+    if (snapshot.empty) {
+      return res.status(404).json({
+        error: "Usuário não encontrado."
+      });
+    }
+
+    const userDocRef = snapshot.docs[0].ref;
+    const userDoc = await userDocRef.get();
+
+    const currentUser = {
+      id: userDoc.id,
+      ...userDoc.data()
+    } as any;
+
+    if (
+      currentUser.firebaseUid &&
+      currentUser.firebaseUid !== firebaseUser.uid
+    ) {
+      return res.status(403).json({
+        error:
+          "Esta conta está vinculada a outra identidade Firebase."
+      });
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+    const nameToUse =
+      birthName ||
+      currentUser.birthName ||
+      currentUser.name;
+
+    const dateToUse =
+      birthDate ||
+      currentUser.birthDate;
+
+    const placeToUse =
+      birthPlace ||
+      currentUser.birthPlace ||
+      "";
+
+    const timeToUse =
+      birthTime ||
+      currentUser.birthTime ||
+      "";
+
+    let spiritualProps = {};
+
+    if (nameToUse && dateToUse) {
+      spiritualProps = calculateSpiritualProfile(
+        nameToUse,
+        dateToUse,
+        timeToUse,
+        placeToUse
+      );
+    }
+
+    const updatedUser = {
+      ...currentUser,
+      firebaseUid: firebaseUser.uid,
+      name: name || currentUser.name,
+      birthName:
+        birthName || currentUser.birthName,
+      birthDate:
+        birthDate || currentUser.birthDate,
+      birthTime:
+        birthTime ||
+        currentUser.birthTime ||
+        "",
+      birthPlace:
+        birthPlace ||
+        currentUser.birthPlace ||
+        "",
+      ...spiritualProps,
+      updatedAt: new Date().toISOString()
+    };
+
+    await userDocRef.set(
+      updatedUser,
+      { merge: true }
+    );
+
+    const db = loadDb();
+
+    db.logs.push({
+      id: "log_" + Date.now(),
+      userId: userDoc.id,
+      action: "Atualização de Identidade",
+      details:
+        "Recálculo do perfil astrológico e numerológico ancestral concluído com sucesso.",
+      timestamp: new Date().toISOString()
+    });
+
+    saveDb(db);
+
+    return res.json({
+      success: true,
+      user: updatedUser
+    });
   }
+);
 
-  const currentUser = {
-    id: userDoc.id,
-    ...userDoc.data()
-  } as any;
 
-  const nameToUse = birthName || currentUser.birthName || currentUser.name;
-  const dateToUse = birthDate || currentUser.birthDate;
-  const placeToUse = birthPlace || currentUser.birthPlace || "";
-  const timeToUse = birthTime || currentUser.birthTime || "";
-
-  let spiritualProps = {};
-  if (nameToUse && dateToUse) {
-    spiritualProps = calculateSpiritualProfile(nameToUse, dateToUse, timeToUse, placeToUse);
-  }
-
-  const updatedUser = {
-    ...currentUser,
-    name: name || currentUser.name,
-    birthName: birthName || currentUser.birthName,
-    birthDate: birthDate || currentUser.birthDate,
-    birthTime: birthTime || currentUser.birthTime || "",
-    birthPlace: birthPlace || currentUser.birthPlace || "",
-    ...spiritualProps,
-    updatedAt: new Date().toISOString()
-  };
-
-  await userDocRef.set(updatedUser, { merge: true });
-
-  const db = loadDb();
-  db.logs.push({
-    id: "log_" + Date.now(),
-    userId,
-    action: "Atualização de Identidade",
-    details: "Recálculo do perfil astrológico e numerológico ancestral concluído com sucesso.",
-    timestamp: new Date().toISOString()
-  });
-  saveDb(db);
-
-  res.json({ success: true, user: updatedUser });
-});
 
 
 
@@ -3250,59 +3604,15 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
   }
 });
 
-
-// Convert order credits confirmation
-app.post("/api/credits/confirm", async (req, res) => {
-  const userId = req.headers["x-user-id"] as string;
-  const { orderId, creditsToReceive, amount } = req.body;
-
-  if (!userId) return res.status(401).json({ error: "Não autorizado." });
-
-  const userDocRef = firestore.collection("users").doc(userId);
-const userDoc = await userDocRef.get();
-
-if (!userDoc.exists) {
-  return res.status(404).json({ error: "Usuário não encontrado." });
-}
-
-const user = userDoc.data() || {};
-
-const currentCredits = Number(user.credits || 0);
-const currentXp = Number(user.xp || 0);
-const xpAwarded = Math.round(Number(amount || 0) * 5);
-
-const newCredits = currentCredits + Number(creditsToReceive || 0);
-const newXp = currentXp + xpAwarded;
-const { level } = checkXpLevel(newXp);
-
-await userDocRef.update({
-  credits: newCredits,
-  xp: newXp,
-  level,
-  lastManualCreditAmount: Number(amount || 0),
-  lastManualCreditsAdded: Number(creditsToReceive || 0),
-  lastManualOrderId: orderId || "",
-  lastManualCreditDate: new Date().toISOString()
-});
-
-const db = loadDb();
-
-db.logs.push({
-  id: "log_" + Date.now(),
-  userId,
-  action: "Recarga de Créditos",
-  details: `Aquisição de +${creditsToReceive} créditos através do PIX / MercadoPago. Valor R$ ${amount}`,
-  timestamp: new Date().toISOString()
-});
-
-saveDb(db);
-
-res.json({
-  success: true,
-  newCredits,
-  newLevel: level,
-  xpAwarded
-});
+// Manual credits confirmation disabled.
+// Credits are granted only by the Mercado Pago webhook
+// after the payment is confirmed by Mercado Pago.
+app.post("/api/credits/confirm", (_req, res) => {
+  return res.status(410).json({
+    success: false,
+    error:
+      "A confirmação manual de créditos foi desativada. Os créditos são liberados automaticamente após a confirmação do pagamento pelo Mercado Pago."
+  });
 });
 
 // Admin API - List Seeker Users
@@ -3416,34 +3726,93 @@ const db = loadDb();
 const userRequestTimestamps: Record<string, number[]> = {};
 
 // Simulated RAG and Main Chat Executor API (Proxying Gemini Server-Side)
-app.post("/api/exu/chat", async (req, res) => {
-  const userId = req.headers["x-user-id"] as string;
 
-  
 
-const { text } = req.body;
 
-if (!userId) {
-  return res.status(401).json({ error: "Sessão não identificada." });
-}
 
-if (!text || !String(text).trim()) {
-  return res.status(400).json({ error: "Digite uma mensagem para consultar Exu." });
-}
+app.post(
+  "/api/exu/chat",
+  requireFirebaseAuth,
+  async (req, res) => {
+    const firebaseUser =
+      (req as any).firebaseUser as admin.auth.DecodedIdToken;
 
-const db = loadDb();
+    const { text } = req.body;
 
-const userRef = firestore.collection("users").doc(String(userId));
-const userDoc = await userRef.get();
+    if (!firebaseUser?.uid) {
+      return res.status(401).json({
+        error: "Sessão Firebase inválida."
+      });
+    }
 
-if (!userDoc.exists) {
-  return res.status(404).json({ error: "Buscador não encontrado." });
-}
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({
+        error: "Digite uma mensagem para consultar Exu."
+      });
+    }
 
-const user = {
-  id: userDoc.id,
-  ...userDoc.data()
-} as any;
+    const firebaseEmail =
+      typeof firebaseUser.email === "string"
+        ? firebaseUser.email.trim().toLowerCase()
+        : "";
+
+    const db = loadDb();
+
+    let userSnapshot = await firestore
+      .collection("users")
+      .where("firebaseUid", "==", firebaseUser.uid)
+      .limit(1)
+      .get();
+
+    // Compatibilidade com contas antigas ainda sem firebaseUid
+    if (userSnapshot.empty && firebaseEmail) {
+      userSnapshot = await firestore
+        .collection("users")
+        .where("email", "==", firebaseEmail)
+        .limit(1)
+        .get();
+    }
+
+    if (userSnapshot.empty) {
+      return res.status(404).json({
+        error: "Buscador não encontrado."
+      });
+    }
+
+    const userDoc = userSnapshot.docs[0];
+    const userRef = userDoc.ref;
+    const userData = userDoc.data() as any;
+
+    if (
+      userData.firebaseUid &&
+      userData.firebaseUid !== firebaseUser.uid
+    ) {
+      return res.status(403).json({
+        error:
+          "Esta conta está vinculada a outra identidade Firebase."
+      });
+    }
+
+    if (!userData.firebaseUid) {
+      await userRef.set(
+        {
+          firebaseUid: firebaseUser.uid,
+          emailVerified: Boolean(firebaseUser.email_verified),
+          updatedAt: new Date().toISOString()
+        },
+        { merge: true }
+      );
+    }
+
+    const user = {
+      id: userDoc.id,
+      ...userData,
+      firebaseUid: firebaseUser.uid
+    } as any;
+
+
+
+
 
 const normalizedText = String(text || "")
   .normalize("NFD")
@@ -3528,26 +3897,107 @@ const shouldChargeCredit = !isOnlySocialMessage;
 
 const consultationType = req.body.type || "comum";
 
-const creditsCost =
-  consultationType === "completa"
-    ? 3
-    : consultationType === "outros"
-      ? 2
-      : 1;
+// ======================================================
+// CONSULTAS — CUSTO FIXO DE 5 CRÉDITOS
+// ======================================================
 
-// Validate Credits
-if (shouldChargeCredit && Number(user.credits || 0) < creditsCost) {
-  return res.status(400).json({
-    error: `Você precisa de ${creditsCost} crédito(s) de Axé para esta consulta.`
+const creditsCost = 5;
+
+// Mantém a pontuação de XP original de cada modalidade.
+// Apenas o preço em créditos passa a ser fixo em 5.
+const xpAwarded =
+  !shouldChargeCredit
+    ? 0
+    : consultationType === "completa"
+      ? 45
+      : consultationType === "outros"
+        ? 30
+        : 15;
+
+
+// Antes de cobrar uma consulta sobre outra pessoa,
+// confirma se os dados necessários foram informados.
+const preChargeLowerText =
+  String(text).toLowerCase();
+
+const preChargeIsLoveQuestion =
+  preChargeLowerText.includes("amor") ||
+  preChargeLowerText.includes("relacionamento") ||
+  preChargeLowerText.includes("ex") ||
+  preChargeLowerText.includes("ela") ||
+  preChargeLowerText.includes("ele") ||
+  preChargeLowerText.includes("trai") ||
+  preChargeLowerText.includes("saudade") ||
+  preChargeLowerText.includes("paixão") ||
+  preChargeLowerText.includes("paixao") ||
+  preChargeLowerText.includes("volta") ||
+  preChargeLowerText.includes("ficante") ||
+  preChargeLowerText.includes("casamento") ||
+  preChargeLowerText.includes("namoro");
+
+const preChargeHasBirthDate =
+  /\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/.test(
+    String(text)
+  ) ||
+  /\bnascid[ao]\b/i.test(String(text));
+
+const preChargeHasOtherPersonName =
+  /[A-Za-zÀ-ÿ]{2,}\s+[A-Za-zÀ-ÿ]{2,}/.test(
+    String(text)
+  );
+
+if (
+  consultationType === "outros" &&
+  preChargeIsLoveQuestion &&
+  (
+    !preChargeHasOtherPersonName ||
+    !preChargeHasBirthDate
+  )
+) {
+  return res.json({
+    success: true,
+    userMessage: {
+      id: "msg_u_" + Date.now(),
+      sender: "user",
+      text,
+      timestamp: new Date().toISOString()
+    },
+    exuMessage: {
+      id: "msg_b_" + (Date.now() + 1),
+      sender: "exu",
+      text:
+        "Antes de abrir esse caminho amoroso, preciso olhar os dois lados da encruzilhada. Me diga o nome completo da outra pessoa, a data de nascimento e, se souber, a hora de nascimento. Com isso eu comparo os caminhos de vocês e faço uma leitura mais firme.",
+      timestamp: new Date().toISOString()
+    },
+    creditsLeft: user.credits,
+    xpAwarded: 0,
+    newLevel: user.level
   });
 }
 
-// Deduct Credit & Award XP
+
+// Validate Credits
+if (
+  shouldChargeCredit &&
+  Number(user.credits || 0) < creditsCost
+) {
+  return res.status(400).json({
+    error:
+      `Você precisa de ${creditsCost} créditos de Axé para realizar esta consulta.`
+  });
+}
+
+
+// Deduct Credits & Award XP
 if (shouldChargeCredit) {
-  const newCredits = Number(user.credits || 0) - creditsCost;
-  const xpAwarded = creditsCost * 15;
-  const newXp = Number(user.xp || 0) + xpAwarded;
-  const { level } = checkXpLevel(newXp);
+  const newCredits =
+    Number(user.credits || 0) - creditsCost;
+
+  const newXp =
+    Number(user.xp || 0) + xpAwarded;
+
+  const { level } =
+    checkXpLevel(newXp);
 
   await userRef.update({
     credits: newCredits,
@@ -4272,12 +4722,14 @@ ${recentMessages}
 `
   : "";
 
+
+
 const consultationType = req.body.type || "comum";
 
 const responseDepthInstruction =
   consultationType === "completa"
     ? `
-TIPO DE CONSULTA: CONSULTA COMPLETA — 3 CRÉDITOS
+TIPO DE CONSULTA: CONSULTA COMPLETA — 5 CRÉDITOS
 
 REGRAS DE PROFUNDIDADE:
 - Entregue uma consulta premium, profunda e detalhada.
@@ -4290,7 +4742,7 @@ REGRAS DE PROFUNDIDADE:
 `
     : consultationType === "outros"
       ? `
-TIPO DE CONSULTA: SOBRE OUTRA PESSOA — 2 CRÉDITOS
+TIPO DE CONSULTA: SOBRE OUTRA PESSOA — 5 CRÉDITOS
 
 REGRAS DE PROFUNDIDADE:
 - Entregue uma leitura intermediária.
@@ -4301,7 +4753,7 @@ REGRAS DE PROFUNDIDADE:
 - Não entregue uma consulta tão profunda quanto a modalidade completa.
 `
       : `
-TIPO DE CONSULTA: PERGUNTA COMUM — 1 CRÉDITO
+TIPO DE CONSULTA: PERGUNTA COMUM — 5 CRÉDITOS
 
 REGRAS DE PROFUNDIDADE:
 - Responda de forma objetiva.
@@ -4325,61 +4777,17 @@ Não repita respostas anteriores.
 Não trate a pergunta atual como isolada se ela continuar o assunto anterior.
 
 OBEDEÇA RIGOROSAMENTE O TIPO DE CONSULTA.
-A profundidade da resposta deve corresponder ao número de créditos pagos.
+A profundidade da resposta deve corresponder ao tipo de consulta selecionado.
 `;
 
-const lowerText = text.toLowerCase();
-
-const isLoveQuestion =
-  lowerText.includes("amor") ||
-  lowerText.includes("relacionamento") ||
-  lowerText.includes("ex") ||
-  lowerText.includes("ela") ||
-  lowerText.includes("ele") ||
-  lowerText.includes("trai") ||
-  lowerText.includes("saudade") ||
-  lowerText.includes("paixão") ||
-  lowerText.includes("paixao") ||
-  lowerText.includes("volta") ||
-  lowerText.includes("ficante") ||
-  lowerText.includes("casamento") ||
-  lowerText.includes("namoro");
-
-const hasBirthDate =
-  /\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/.test(text) ||
-  /\bnascid[ao]\b/i.test(text);
-
-const hasOtherPersonName =
-  /[A-Za-zÀ-ÿ]{2,}\s+[A-Za-zÀ-ÿ]{2,}/.test(text);
-
-
-if (
-  consultationType === "outros" &&
-  isLoveQuestion &&
-  (!hasOtherPersonName || !hasBirthDate)
-) {
 
 
 
-  return res.json({
-    success: true,
-    userMessage: {
-      id: "msg_u_" + Date.now(),
-      sender: "user",
-      text,
-      timestamp: new Date().toISOString()
-    },
-    exuMessage: {
-      id: "msg_b_" + (Date.now() + 1),
-      sender: "exu",
-      text:
-        "Antes de abrir esse caminho amoroso, preciso olhar os dois lados da encruzilhada. Me diga o nome completo da outra pessoa, a data de nascimento e, se souber, a hora de nascimento. Com isso eu comparo os caminhos de vocês e faço uma leitura mais firme.",
-      timestamp: new Date().toISOString()
-    },
-    creditsLeft: user.credits
-  });
-}
 
+
+
+// A validação dos dados da consulta "outros"
+// já foi realizada antes da cobrança dos créditos.
 
 
 
@@ -4449,19 +4857,31 @@ try {
   });
 
   db.logs.push({
-    id: "log_" + Date.now(),
-    userId: user.id,
-    action: "Pergunta realizada ao Terreiro",
-    details: `Buscador gastou 1 crédito e subiu nível. Text: "${text.substring(0, 30)}..."`,
-    timestamp: new Date().toISOString()
-  });
+  id: "log_" + Date.now(),
+  userId: user.id,
+  action: "Pergunta realizada ao Terreiro",
+  details: `Buscador gastou ${creditsCost} créditos. Text: "${text.substring(0, 30)}..."`,
+  timestamp: new Date().toISOString()
+});
 
-  res.json({
+saveDb(db);
+
+return res.json({
   success: true,
-  userMessage: { id: userMsgId, sender: "user", text, timestamp: new Date().toISOString() },
-  exuMessage: { id: botMsgId, sender: "exu", text: finalResponseText, timestamp: new Date().toISOString() },
+  userMessage: {
+    id: userMsgId,
+    sender: "user",
+    text,
+    timestamp: new Date().toISOString()
+  },
+  exuMessage: {
+    id: botMsgId,
+    sender: "exu",
+    text: finalResponseText,
+    timestamp: new Date().toISOString()
+  },
   creditsLeft: user.credits,
-  xpAwarded: 15,
+  xpAwarded,
   newLevel: user.level
 });
 });

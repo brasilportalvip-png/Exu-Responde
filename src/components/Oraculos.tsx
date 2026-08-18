@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { Sparkles, Compass, Flame, Calendar, Award, BookOpen, Clock, Heart, DollarSign, Key, Info } from "lucide-react";
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, TarotCard } from "../types";
+import { auth } from "../firebase";
 
 interface OraculosProps {
   user: UserProfile;
@@ -57,10 +58,21 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
     AudioEngine.playPortalSwoosh();
 
     try {
+      const firebaseUser = auth.currentUser;
+
+      if (!firebaseUser) {
+        throw new Error(
+          "Sua sessão expirou. Entre novamente para consultar o Tarô."
+        );
+      }
+
+      const token = await firebaseUser.getIdToken();
+
       const res = await fetch("/api/oraculo/tarot", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
           "x-user-id": user.id
         },
         body: JSON.stringify({
@@ -119,10 +131,21 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
     AudioEngine.playPortalSwoosh();
 
     try {
+      const firebaseUser = auth.currentUser;
+
+      if (!firebaseUser) {
+        throw new Error(
+          "Sua sessão expirou. Entre novamente para consultar a Numerologia."
+        );
+      }
+
+      const token = await firebaseUser.getIdToken();
+
       const res = await fetch("/api/oraculo/numerologia", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
           "x-user-id": user.id
         },
         body: JSON.stringify({
@@ -170,10 +193,21 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
     AudioEngine.playPortalSwoosh();
 
     try {
+      const firebaseUser = auth.currentUser;
+
+      if (!firebaseUser) {
+        throw new Error(
+          "Sua sessão expirou. Entre novamente para consultar a Astrologia."
+        );
+      }
+
+      const token = await firebaseUser.getIdToken();
+
       const res = await fetch("/api/oraculo/astrologia", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
           "x-user-id": user.id
         },
         body: JSON.stringify({

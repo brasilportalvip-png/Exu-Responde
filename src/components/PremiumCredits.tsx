@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Coins, Gift } from "lucide-react";
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, CreditPlan } from "../types";
+import { auth } from "../firebase";
 
 interface PremiumCreditsProps {
   user: UserProfile;
@@ -10,8 +11,23 @@ interface PremiumCreditsProps {
 }
 
 const CREDIT_PLANS: CreditPlan[] = [
-  { id: "plan_prata", name: "Plano Prata", price: 49.0, credits: 50, bonus: 0, color: "from-zinc-700 to-zinc-900" },
-  { id: "plan_ouro", name: "Plano Ouro", price: 120.0, credits: 125, bonus: 0, popular: true, color: "from-yellow-700 via-yellow-600 to-amber-950" }
+  {
+    id: "plan_prata",
+    name: "Plano Prata",
+    price: 49.0,
+    credits: 50,
+    bonus: 0,
+    color: "from-zinc-700 to-zinc-900"
+  },
+  {
+    id: "plan_ouro",
+    name: "Plano Ouro",
+    price: 120.0,
+    credits: 125,
+    bonus: 0,
+    popular: true,
+    color: "from-yellow-700 via-yellow-600 to-amber-950"
+  }
 ];
 
 export default function PremiumCredits({ user }: PremiumCreditsProps) {
@@ -22,10 +38,24 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
     AudioEngine.playCrystalBell();
 
     try {
+      const firebaseUser = auth.currentUser;
+
+      if (!firebaseUser) {
+        throw new Error(
+          "Sua sessão expirou. Entre novamente para adquirir créditos."
+        );
+      }
+
+      const token = await firebaseUser.getIdToken();
+
       const res = await fetch("/api/credits/buy", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+
+          // Compatibilidade temporária com a rota atual do server.ts.
+          // Será removido quando a proteção consolidada do backend for aplicada.
           "x-user-id": user.id
         },
         body: JSON.stringify({
@@ -37,7 +67,9 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || "Erro ao criar pagamento.");
+        throw new Error(
+          data.error || "Erro ao criar pagamento."
+        );
       }
 
       if (data.checkoutUrl) {
@@ -45,16 +77,24 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
         return;
       }
 
-      alert("Checkout Mercado Pago não retornou URL.");
+      throw new Error(
+        "Checkout Mercado Pago não retornou URL."
+      );
     } catch (e: any) {
-      alert("Erro ao criar pagamento: " + e.message);
+      alert(
+        "Erro ao criar pagamento: " +
+          (e?.message || "Falha desconhecida.")
+      );
     } finally {
       setLoadingPlanId(null);
     }
   };
 
   return (
-    <div id="premium_credits_module" className="space-y-6 font-sans select-none">
+    <div
+      id="premium_credits_module"
+      className="space-y-6 font-sans select-none"
+    >
       <div className="text-center max-w-xl mx-auto space-y-1 select-none">
         <span className="text-[10px] font-mono tracking-widest text-red-500 font-bold uppercase">
           Abundância & Câmbio de Axé
@@ -65,8 +105,9 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
         </h2>
 
         <p className="text-xs text-zinc-400 leading-normal">
-          Para garantir o equilíbrio ético de Ifá, todas as consultas e análises profundas exigem uma fração de axé.
-          Adquira créditos e evolua seus níveis.
+          Para garantir o equilíbrio ético de Ifá, todas as consultas e
+          análises profundas exigem uma fração de axé. Adquira créditos
+          e evolua seus níveis.
         </p>
       </div>
 
@@ -110,18 +151,25 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
 
               {plan.bonus > 0 && (
                 <p className="text-[10px] text-yellow-500 font-mono uppercase font-bold flex items-center gap-1 mb-4 select-none">
-                  <Gift className="w-3.5 h-3.5" /> Inclui +{plan.bonus} Bônus do Terreiro
+                  <Gift className="w-3.5 h-3.5" />
+                  Inclui +{plan.bonus} Bônus do Terreiro
                 </p>
               )}
             </div>
 
             <div className="mt-4 pt-4 border-t border-zinc-900 space-y-3">
               <div className="flex items-baseline gap-1">
-                <span className="text-xs font-mono text-zinc-500">R$</span>
+                <span className="text-xs font-mono text-zinc-500">
+                  R$
+                </span>
+
                 <span className="text-2xl font-mono font-black text-amber-50">
                   {plan.price.toFixed(2).replace(".", ",")}
                 </span>
-                <span className="text-[10px] text-zinc-500 font-mono">pix</span>
+
+                <span className="text-[10px] text-zinc-500 font-mono">
+                  pix
+                </span>
               </div>
 
               <button
@@ -130,7 +178,9 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
                 disabled={loadingPlanId === plan.id}
                 className="w-full py-2.5 font-bold bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black text-xs rounded-xl transition-all cursor-pointer select-none uppercase tracking-widest shadow-sm disabled:opacity-50"
               >
-                {loadingPlanId === plan.id ? "ABRINDO MERCADO PAGO..." : "ADQUIRIR AXÉ"}
+                {loadingPlanId === plan.id
+                  ? "ABRINDO MERCADO PAGO..."
+                  : "ADQUIRIR AXÉ"}
               </button>
             </div>
           </div>

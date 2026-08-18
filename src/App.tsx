@@ -5,6 +5,8 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { auth } from "./firebase";
 import { 
   Sparkles, Compass, LogIn, LogOut, Flame, Volume2, VolumeX, Send, 
   BookOpen, User, Coins, Award, ShieldCheck, Terminal, HelpCircle, 
@@ -50,18 +52,76 @@ const SESSION_KEY = "exu_responde_chat_session";
 
 
 
-  useEffect(() => {
-  setUser(null);
-  setMessages([]);
-  setInputText("");
-  setConsultationType("comum");
-  setShowEntranceModal(true);
-  setCheckedAuth(true);
+   useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (!firebaseUser || !firebaseUser.email) {
+        setUser(null);
+        setMessages([]);
+        setInputText("");
+        setConsultationType("comum");
+        setShowEntranceModal(true);
+        setCheckedAuth(true);
+        return;
+      }
 
-  localStorage.removeItem(SESSION_KEY);
-  localStorage.removeItem("exu_user_id");
-  localStorage.removeItem("exu_user_email");
-}, []);
+      try {
+        const token = await firebaseUser.getIdToken();
+
+        const loginRes = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            email: firebaseUser.email
+          })
+        });
+
+        const loginData = await loginRes.json();
+
+        if (!loginRes.ok || !loginData.user) {
+          throw new Error(
+            loginData.error || "Não foi possível restaurar a sessão."
+          );
+        }
+
+        const restoredUser = loginData.user as UserProfile;
+
+        setUser(restoredUser);
+        setShowEntranceModal(false);
+
+        const profileRes = await fetch("/api/user/profile", {
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "x-user-id": restoredUser.id
+          }
+        });
+
+        const profileData = await profileRes.json();
+
+        if (
+          profileRes.ok &&
+          Array.isArray(profileData.chats) &&
+          profileData.chats.length > 0
+        ) {
+          setMessages(profileData.chats);
+        } else {
+          setDefaultGreeting(restoredUser);
+        }
+      } catch (error) {
+        console.error("Erro ao restaurar sessão:", error);
+
+        setUser(null);
+        setMessages([]);
+        setShowEntranceModal(true);
+      } finally {
+        setCheckedAuth(true);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
 
 
 
@@ -102,33 +162,79 @@ text: `Bem Vindo Ao Reino De Exu! Faça Sua Pergunta.`,
     }
   };
 
-  const handleLoginSuccess = (loggedInUser: UserProfile) => {
+  
+
+
+
+  const handleLoginSuccess = async (loggedInUser: UserProfile) => {
     setUser(loggedInUser);
-    localStorage.setItem("exu_user_id", loggedInUser.id);
-    localStorage.setItem("exu_user_email", loggedInUser.email);
     setShowEntranceModal(false);
-    
-    // Play transition sounds
+
     AudioEngine.playPortalSwoosh();
+
     if (soundEnabled) {
       AudioEngine.playDrone();
     }
 
-    if (messages.length === 0) {
-  setDefaultGreeting(loggedInUser);
-}
+    try {
+      const firebaseUser = auth.currentUser;
+
+      if (!firebaseUser) {
+        setDefaultGreeting(loggedInUser);
+        return;
+      }
+
+      const token = await firebaseUser.getIdToken();
+
+      const profileRes = await fetch("/api/user/profile", {
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "x-user-id": loggedInUser.id
+        }
+      });
+
+      const profileData = await profileRes.json();
+
+      if (
+        profileRes.ok &&
+        Array.isArray(profileData.chats) &&
+        profileData.chats.length > 0
+      ) {
+        setMessages(profileData.chats);
+      } else {
+        setDefaultGreeting(loggedInUser);
+      }
+    } catch (error) {
+      console.error("Erro ao carregar histórico:", error);
+      setDefaultGreeting(loggedInUser);
+    }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     AudioEngine.playPortalSwoosh();
     AudioEngine.stopDrone();
+
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error("Erro ao encerrar sessão Firebase:", error);
+    }
+
     setUser(null);
     setMessages([]);
-    localStorage.removeItem("exu_user_id");
-    localStorage.removeItem("exu_user_email");
-localStorage.removeItem(SESSION_KEY);
+    setInputText("");
+    setConsultationType("comum");
+    setShowEntranceModal(true);
     setActiveModal(null);
+
+    localStorage.removeItem(SESSION_KEY);
   };
+
+
+
+
+
+
 
   const syncUpdatedUser = (updatedUser: UserProfile) => {
     setUser(updatedUser);
@@ -169,15 +275,33 @@ localStorage.removeItem(SESSION_KEY);
 
     setMessages(prev => [...prev, userMsg]);
 
+    
+
+
     try {
+      const firebaseUser = auth.currentUser;
+
+      if (!firebaseUser) {
+        throw new Error("Sua sessão expirou. Entre novamente.");
+      }
+
+      const token = await firebaseUser.getIdToken();
+
       const res = await fetch("/api/exu/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
           "x-user-id": user.id
         },
-        body: JSON.stringify({ text: question, type: consultationType })
+        body: JSON.stringify({
+          text: question,
+          type: consultationType
+        })
       });
+
+
+
 
       const data = await res.json();
       if (!res.ok) {

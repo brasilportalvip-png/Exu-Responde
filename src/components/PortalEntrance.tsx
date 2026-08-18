@@ -3,7 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from "firebase/auth";
+import {
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendEmailVerification,
+  sendPasswordResetEmail
+} from "firebase/auth";
 import { auth } from "../firebase";
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
@@ -46,9 +51,7 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
   // Anti-abuse security & verification states
   const [honeypot, setHoneypot] = useState("");
   const [captchaAnswer, setCaptchaAnswer] = useState("");
-  const [generatedCode, setGeneratedCode] = useState("");
-  const [inputCode, setInputCode] = useState("");
-  const [sessionSign, setSessionSign] = useState("");
+   const [sessionSign, setSessionSign] = useState("");
 
   // Generate device Fingerprint tracking
   const getDeviceFingerprint = () => {
@@ -82,8 +85,11 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
     };
   }, []);
 
-  // First step of registration: Anti-bot checks and trigger Verification code
-  const handleInitiateRegister = (e: React.FormEvent) => {
+  
+
+
+  // First step of registration: create real Firebase identity and backend profile
+  const handleInitiateRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
@@ -93,35 +99,16 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
     }
 
     if (!birthName || !birthDate || !email || !password) {
-      setError("Todos os campos de cadastro são obrigatórios para traçar os caminhos cósmicos.");
+      setError(
+        "Todos os campos de cadastro são obrigatórios para traçar os caminhos cósmicos."
+      );
       return;
     }
 
-    // Mathematical Captcha verification checks
     if (!captchaAnswer || parseInt(captchaAnswer) !== 7) {
-      setError("A resposta do desafio antibot está incorreta. Quanto é 4 + 3?");
-      return;
-    }
-
-    // Generate random 4-digit code for mock confirmation
-    const code = Math.floor(1000 + Math.random() * 9000).toString();
-    setGeneratedCode(code);
-    setViewState("verify");
-    AudioEngine.playCrystalBell();
-  };
-
-  // Second step: Real backend submit with device metadata & IP tracker logs
-  const handleExecuteFinalRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
-
-    if (!inputCode) {
-      setError("Digite o código de verificação recebido em seu e-mail.");
-      return;
-    }
-
-    if (inputCode !== generatedCode) {
-      setError("Código de verificação incorreto. Verifique a caixa ou use o simulador místico.");
+      setError(
+        "A resposta do desafio antibot está incorreta. Quanto é 4 + 3?"
+      );
       return;
     }
 
@@ -133,45 +120,191 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
     }
 
     try {
-  const backendRes = await fetch("/api/auth/register", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      birthName,
-      birthDate,
-      birthTime,
-      birthPlace,
-      email,
-      password,
-      deviceId: getDeviceFingerprint(),
-      browser: navigator.userAgent,
-      session: sessionSign,
-      captchaAnswer,
-      honeypot
-    })
-  });
+      const firebaseCredential = await createUserWithEmailAndPassword(
+        auth,
+        email.trim().toLowerCase(),
+        password
+      );
 
-  const backendData = await backendRes.json();
+      const firebaseUser = firebaseCredential.user;
+      const token = await firebaseUser.getIdToken();
 
-  if (!backendRes.ok) {
-    throw new Error(backendData.error || "Erro ao criar usuário.");
-  }
+      const backendRes = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          birthName,
+          birthDate,
+          birthTime,
+          birthPlace,
+          email: email.trim().toLowerCase(),
+          deviceId: getDeviceFingerprint(),
+          browser: navigator.userAgent,
+          session: sessionSign,
+          captchaAnswer,
+          honeypot
+        })
+      });
 
-  try {
-    await createUserWithEmailAndPassword(auth, email, password);
-  } catch (firebaseErr: any) {
-    console.warn("Firebase Auth já existe ou falhou:", firebaseErr.message);
-  }
+      const backendData = await backendRes.json();
 
-  onLoginSuccess(backendData.user);
-  setLoading(false);
+      if (!backendRes.ok) {
+        try {
+          await firebaseUser.delete();
+        } catch (deleteError) {
+          console.error(
+            "Não foi possível desfazer a conta Firebase:",
+            deleteError
+          );
+        }
 
-} catch (err: any) {
-  setError(err.message || "Tentativa de cadastro falhou. Tente novamente.");
-  setLoading(false);
-}
+        throw new Error(
+          backendData.error || "Erro ao concluir cadastro."
+        );
+      }
+
+      auth.languageCode = "pt-BR";
+
+      try {
+        await sendEmailVerification(firebaseUser);
+      } catch (verificationError) {
+        console.error(
+          "Falha ao enviar e-mail de verificação:",
+          verificationError
+        );
+      }
+
+      setViewState("verify");
+      AudioEngine.playCrystalBell();
+
+    } catch (err: any) {
+      console.error("Erro no cadastro:", err);
+
+      if (err?.code === "auth/email-already-in-use") {
+        setError(
+          "Este e-mail já possui uma conta. Entre pela opção MINHA CONTA."
+        );
+      } else if (err?.code === "auth/weak-password") {
+        setError(
+          "A senha escolhida é muito fraca. Crie uma senha mais segura."
+        );
+      } else if (err?.code === "auth/invalid-email") {
+        setError(
+          "O endereço de e-mail informado não é válido."
+        );
+      } else {
+        setError(
+          err?.message || "Não foi possível concluir seu cadastro."
+        );
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Second step: confirm real Firebase e-mail verification
+  const handleConfirmVerifiedEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    try {
+      const firebaseUser = auth.currentUser;
+
+      if (!firebaseUser) {
+        setViewState("login");
+        throw new Error("Sua sessão de cadastro expirou. Entre novamente.");
+      }
+
+      await firebaseUser.reload();
+
+      if (!firebaseUser.emailVerified) {
+        setError(
+          "Seu e-mail ainda não foi confirmado. Abra o e-mail enviado pelo Exu Responde, clique no link de confirmação e depois volte aqui."
+        );
+        return;
+      }
+
+      const token = await firebaseUser.getIdToken(true);
+
+      const backendRes = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          email: firebaseUser.email
+        })
+      });
+
+      const backendData = await backendRes.json();
+
+      if (!backendRes.ok || !backendData.user) {
+        throw new Error(
+          backendData.error || "Não foi possível carregar sua conta."
+        );
+      }
+
+      onLoginSuccess(backendData.user);
+    } catch (err: any) {
+      setError(
+        err?.message || "Não foi possível confirmar sua conta."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+ 
+
+
+  const handleForgotPassword = async () => {
+    setError("");
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    if (!normalizedEmail) {
+      setError(
+        "Digite seu e-mail no campo acima para receber o link de recuperação de senha."
+      );
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      auth.languageCode = "pt-BR";
+
+      await sendPasswordResetEmail(
+        auth,
+        normalizedEmail
+      );
+
+      alert(
+        "Enviamos as instruções para redefinir sua senha. Verifique sua caixa de entrada e também a pasta de spam."
+      );
+    } catch (err: any) {
+      console.error(
+        "Erro ao solicitar recuperação de senha:",
+        err
+      );
+
+      if (err?.code === "auth/invalid-email") {
+        setError(
+          "Digite um endereço de e-mail válido."
+        );
+      } else {
+        setError(
+          "Não foi possível enviar o e-mail de recuperação neste momento. Tente novamente."
+        );
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -191,29 +324,68 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
     }
 
     try {
-  await signInWithEmailAndPassword(auth, email, password);
+      const credential = await signInWithEmailAndPassword(
+        auth,
+        email.trim().toLowerCase(),
+        password
+      );
 
-  const backendRes = await fetch("/api/auth/login", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      email,
-      password
-    })
-  });
+      const firebaseUser = credential.user;
 
-  const backendData = await backendRes.json();
+      if (!firebaseUser.emailVerified) {
+        auth.languageCode = "pt-BR";
 
-  if (!backendRes.ok) {
-    throw new Error(backendData.error || "Erro ao carregar usuário.");
-  }
+        try {
+          await sendEmailVerification(firebaseUser);
+        } catch (verificationError) {
+          console.error(
+            "Falha ao reenviar verificação:",
+            verificationError
+          );
+        }
 
-  onLoginSuccess(backendData.user);
-  setLoading(false);
+        setViewState("verify");
+        setError(
+          "Seu e-mail ainda não foi confirmado. Enviamos novamente o link de verificação."
+        );
+        return;
+      }
+
+      const token = await firebaseUser.getIdToken(true);
+
+      const backendRes = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          email: firebaseUser.email
+        })
+      });
+
+      const backendData = await backendRes.json();
+
+      if (!backendRes.ok || !backendData.user) {
+        throw new Error(
+          backendData.error || "Erro ao carregar usuário."
+        );
+      }
+
+      onLoginSuccess(backendData.user);
     } catch (err: any) {
-      setError(err.message || "Erro de conexão astral.");
+      console.error("Erro no login:", err);
+
+      if (err?.code === "auth/invalid-credential") {
+        setError("E-mail ou senha incorretos.");
+      } else if (err?.code === "auth/invalid-email") {
+        setError("O endereço de e-mail informado não é válido.");
+      } else if (err?.code === "auth/too-many-requests") {
+        setError("Muitas tentativas de acesso. Aguarde um momento e tente novamente.");
+      } else {
+        setError(err?.message || "Erro de conexão astral.");
+      }
+    } finally {
       setLoading(false);
     }
   };
@@ -546,18 +718,28 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
                 </p>
               </div>
 
-              {/* Simulated Mailbox Alert Box mockup */}
-              <div className="mb-4 bg-amber-950/45 border border-amber-500/35 p-3.5 rounded-xl text-left">
-                <div className="flex items-center gap-2 text-yellow-500 text-xs font-mono font-bold uppercase mb-1">
-                  <Mail className="w-4 h-4" /> 📥 [NOTIFICAÇÃO VIRTUAL]
-                </div>
-                <p className="text-[11px] text-zinc-300 font-mono leading-relaxed">
-                  Enviamos um e-mail com o código de confirmação ancestral para <span className="text-yellow-400 underline font-semibold">{email}</span>. Use o código temporário abaixo para validar:
-                </p>
-                <div className="mt-2 text-center bg-black/80 py-2 border border-yellow-500/20 rounded-lg text-lg font-bold font-mono tracking-widest text-yellow-400 select-all">
-                  {generatedCode}
-                </div>
-              </div>
+              
+
+
+<div className="mb-4 bg-amber-950/45 border border-amber-500/35 p-4 rounded-xl text-left">
+  <div className="flex items-center gap-2 text-yellow-500 text-xs font-mono font-bold uppercase mb-2">
+    <Mail className="w-4 h-4" />
+    VERIFICAÇÃO REAL DE E-MAIL
+  </div>
+
+  <p className="text-[11px] text-zinc-300 font-mono leading-relaxed">
+    Enviamos um link de confirmação para{" "}
+    <span className="text-yellow-400 underline font-semibold">
+      {email}
+    </span>.
+  </p>
+
+  <p className="text-[11px] text-zinc-400 font-mono leading-relaxed mt-2">
+    Abra seu e-mail, clique no link de confirmação e depois volte
+    para esta tela para concluir sua entrada no portal.
+  </p>
+</div>
+
 
               {error && (
                 <div className="mb-4 text-red-500 text-xs font-mono bg-red-950/60 py-2.5 px-4 border border-red-900/60 rounded-xl text-center">
@@ -565,42 +747,37 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
                 </div>
               )}
 
-              <form onSubmit={handleExecuteFinalRegister} className="space-y-4 text-left">
-                <div>
-                  <label className="block text-[10px] font-mono font-bold tracking-widest text-zinc-300 uppercase mb-1.5 flex items-center gap-1.5">
-                    Chave de Ativação (4 Dígitos)
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={4}
-                    value={inputCode}
-                    disabled={loading}
-                    onChange={(e) => setInputCode(e.target.value)}
-                    placeholder="Digite os 4 dígitos"
-                    className="w-full text-center tracking-[0.3em] px-3.5 py-3 rounded-lg border border-zinc-800 bg-black/70 text-yellow-300 placeholder-zinc-700 focus:outline-none focus:border-yellow-500/70 transition-all font-mono text-lg font-extrabold"
-                  />
-                </div>
+              
 
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full relative flex items-center justify-center gap-3 py-4 mt-2 font-extrabold tracking-[0.2em] text-black bg-gradient-to-r from-yellow-300 via-amber-400 to-amber-600 hover:from-yellow-250 hover:to-amber-500 rounded-xl shadow-[0_4px_30px_rgba(234,179,8,0.35)] active:scale-[0.98] transition-all duration-300 cursor-pointer disabled:opacity-50 overflow-hidden"
-                >
-                  {loading ? (
-                    <>
-                      <div className="w-5 h-5 border-2 border-black border-t-transparent rounded-full animate-spin" />
-                      <span className="text-xs">CRUZANDO CORRENTES...</span>
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle className="w-4 h-4 text-black stroke-[2.5]" />
-                      <span className="text-xs uppercase">ATIVAR MINHA CONTA</span>
-                    </>
-                  )}
-                  <div className="absolute inset-x-0 bottom-0 h-[2px] bg-red-600 animate-pulse" />
-                </button>
-              </form>
+
+<form
+  onSubmit={handleConfirmVerifiedEmail}
+  className="space-y-4 text-left"
+>
+  <button
+    type="submit"
+    disabled={loading}
+    className="w-full relative flex items-center justify-center gap-3 py-4 mt-2 font-extrabold tracking-[0.2em] text-black bg-gradient-to-r from-yellow-300 via-amber-400 to-amber-600 hover:from-yellow-250 hover:to-amber-500 rounded-xl shadow-[0_4px_30px_rgba(234,179,8,0.35)] active:scale-[0.98] transition-all duration-300 cursor-pointer disabled:opacity-50 overflow-hidden"
+  >
+    {loading ? (
+      <>
+        <div className="w-5 h-5 border-2 border-black border-t-transparent rounded-full animate-spin" />
+        <span className="text-xs">
+          CONFIRMANDO IDENTIDADE...
+        </span>
+      </>
+    ) : (
+      <>
+        <CheckCircle className="w-4 h-4 text-black stroke-[2.5]" />
+        <span className="text-xs uppercase">
+          JÁ CONFIRMEI MEU E-MAIL
+        </span>
+      </>
+    )}
+
+    <div className="absolute inset-x-0 bottom-0 h-[2px] bg-red-600 animate-pulse" />
+  </button>
+</form>
 
               <div className="mt-5 text-center pt-3 border-t border-zinc-900 flex flex-col gap-2">
                 <button
@@ -686,6 +863,9 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
                   </div>
                 </div>
 
+               
+
+
                 <button
                   type="submit"
                   disabled={loading}
@@ -704,6 +884,17 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
                   )}
                   <div className="absolute inset-x-0 bottom-0 h-[2px] bg-red-600 animate-pulse" />
                 </button>
+
+                <button
+                  type="button"
+                  onClick={handleForgotPassword}
+                  disabled={loading}
+                  className="w-full text-center text-[10px] font-mono font-bold tracking-widest text-zinc-500 hover:text-yellow-500 transition cursor-pointer disabled:opacity-50"
+                >
+                  ESQUECI MINHA SENHA
+                </button>
+
+
               </form>
 
               <div className="mt-5 text-center pt-3 border-t border-zinc-900 flex flex-col gap-2">

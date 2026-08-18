@@ -8,6 +8,7 @@ import { motion } from "motion/react";
 import { Users, BarChart3, BookOpen, Settings, Plus, Key, Terminal, RefreshCw, Layers } from "lucide-react";
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, KnowledgeItem } from "../types";
+import { auth } from "../firebase";
 
 interface AdminPanelProps {
   user: UserProfile;
@@ -36,25 +37,70 @@ export default function AdminPanel({ user }: AdminPanelProps) {
 
   const fetchAdminDataHash = async () => {
     setLoadingStats(true);
+    setStatusError("");
+
     try {
-      const hds = { "x-user-id": user.id };
-      
-      const statsRes = await fetch("/api/admin/analytics", { headers: hds });
+      const firebaseUser = auth.currentUser;
+
+      if (!firebaseUser) {
+        throw new Error(
+          "Sua sessão expirou. Entre novamente para acessar o painel administrativo."
+        );
+      }
+
+      const token = await firebaseUser.getIdToken();
+
+      const hds = {
+        "Authorization": `Bearer ${token}`,
+        "x-user-id": user.id
+      };
+
+      const statsRes = await fetch("/api/admin/analytics", {
+        headers: hds
+      });
+
       const statsObj = await statsRes.json();
-      
-      const usersRes = await fetch("/api/admin/users", { headers: hds });
+
+      if (!statsRes.ok) {
+        throw new Error(
+          statsObj.error || "Falha ao carregar analytics."
+        );
+      }
+
+      const usersRes = await fetch("/api/admin/users", {
+        headers: hds
+      });
+
       const usersObj = await usersRes.json();
 
-      const libRes = await fetch("/api/admin/library");
+      if (!usersRes.ok) {
+        throw new Error(
+          usersObj.error || "Falha ao carregar usuários."
+        );
+      }
+
+      const libRes = await fetch("/api/admin/library", {
+        headers: hds
+      });
+
       const libObj = await libRes.json();
+
+      if (!libRes.ok) {
+        throw new Error(
+          libObj.error || "Falha ao carregar biblioteca."
+        );
+      }
 
       setStats(statsObj.stats);
       setLogs(usersObj.logs || []);
       setRegistrations(usersObj.seekers || []);
       setLibraryData(libObj.library || []);
-
-    } catch (e) {
+    } catch (e: any) {
       console.error("Failed loading stats:", e);
+
+      setStatusError(
+        e?.message || "Falha ao carregar dados administrativos."
+      );
     } finally {
       setLoadingStats(false);
     }
@@ -74,10 +120,21 @@ export default function AdminPanel({ user }: AdminPanelProps) {
     AudioEngine.playCrystalBell();
 
     try {
+      const firebaseUser = auth.currentUser;
+
+      if (!firebaseUser) {
+        throw new Error(
+          "Sua sessão expirou. Entre novamente para alterar a biblioteca."
+        );
+      }
+
+      const token = await firebaseUser.getIdToken();
+
       const res = await fetch("/api/admin/library/add", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
           "x-user-id": user.id
         },
         body: JSON.stringify({

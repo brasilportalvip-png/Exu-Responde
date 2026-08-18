@@ -8,6 +8,7 @@ import { motion } from "motion/react";
 import { Award, Compass, Gift, Clock, ShieldCheck, Flame, Compass as ArIcon, Heart as AguaIcon, ShieldAlert } from "lucide-react";
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile } from "../types";
+import { auth } from "../firebase";
 
 interface UserProfileProps {
   user: UserProfile;
@@ -63,11 +64,21 @@ export default function UserProfilePanel({ user, onUpdateUser }: UserProfileProp
     AudioEngine.playCrystalBell();
 
     try {
+      const firebaseUser = auth.currentUser;
+
+      if (!firebaseUser) {
+        throw new Error(
+          "Sua sessão expirou. Entre novamente para atualizar o perfil."
+        );
+      }
+
+      const token = await firebaseUser.getIdToken();
+
       const res = await fetch("/api/user/update", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-user-id": user.id
+          "Authorization": `Bearer ${token}`
         },
         body: JSON.stringify({
           name: editName,
