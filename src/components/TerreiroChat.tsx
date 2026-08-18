@@ -153,9 +153,11 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
   };
 
   return (
-    <div id="terreiro_chat_panel" className="flex flex-col h-full bg-zinc-950/80 border border-red-950/40 rounded-3xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.85)] backdrop-blur-md">
-      
-      {/* Top Header details */}
+    
+<div id="terreiro_chat_panel" className="flex flex-col h-full bg-zinc-950/80 border border-red-950/40 rounded-3xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.85)] backdrop-blur-md">
+     
+
+ {/* Top Header details */}
       <div className="px-6 py-4 bg-gradient-to-r from-red-950/40 via-black to-red-950/40 border-b border-red-950/60 flex items-center justify-between">
         <div className="flex items-center gap-3">
           {/* Animated small fire node */}

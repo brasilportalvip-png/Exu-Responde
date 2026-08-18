@@ -27,20 +27,50 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState("");
   const [loading, setLoading] = useState(false);
-  const [favorites, setFavorites] = useState<string[]>([]);
-  const [consultationType, setConsultationType] = useState<"comum" | "outros" | "completa">("comum");
-  
+const [favorites, setFavorites] = useState<string[]>([]);
+const [consultationType, setConsultationType] = useState<"comum" | "outros" | "completa">("comum");
+
+const SESSION_KEY = "exu_responde_chat_session";
+ 
   // Modal controllers
-  const [showEntranceModal, setShowEntranceModal] = useState(false);
+  const [showEntranceModal, setShowEntranceModal] = useState(true);
   const [activeModal, setActiveModal] = useState<"profile" | "oracles" | "library" | "credits" | "admin" | null>(null);
+  const [showSupportModal, setShowSupportModal] = useState(false);
   const [libraryTab, setLibraryTab] = useState<"odus" | "exus" | "arcades">("odus");
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Load user session
+
+
+
+
+
+
+
+
+
   useEffect(() => {
+  setUser(null);
+  setMessages([]);
+  setInputText("");
+  setConsultationType("comum");
+  setShowEntranceModal(true);
   setCheckedAuth(true);
+
+  localStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem("exu_user_id");
+  localStorage.removeItem("exu_user_email");
 }, []);
+
+
+
+
+
+
+
+
+
 
   // Set default initial greeting if chat is fresh
   const setDefaultGreeting = (currentUser: UserProfile) => {
@@ -84,7 +114,9 @@ text: `Bem Vindo Ao Reino De Exu! Faça Sua Pergunta.`,
       AudioEngine.playDrone();
     }
 
-    setDefaultGreeting(loggedInUser);
+    if (messages.length === 0) {
+  setDefaultGreeting(loggedInUser);
+}
   };
 
   const handleLogout = () => {
@@ -94,6 +126,7 @@ text: `Bem Vindo Ao Reino De Exu! Faça Sua Pergunta.`,
     setMessages([]);
     localStorage.removeItem("exu_user_id");
     localStorage.removeItem("exu_user_email");
+localStorage.removeItem(SESSION_KEY);
     setActiveModal(null);
   };
 
@@ -263,47 +296,50 @@ setUser({
           background: rgba(185, 28, 28, 0.4);
           border-radius: 9px;
         }
+
+
+
       `}</style>
 
-      {/* FUNDO DA VINHETA  */}
-      <div id="portal_espiritual" className="absolute inset-0 z-0 overflow-hidden pointer-events-none select-none bg-gradient-to-tr from-zinc-950 via-zinc-950/90 to-red-950/30">
-        <video
-          id="vinhete_video"
-          src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
-          className="w-full h-full object-cover filter brightness-[0.22] contrast-[1.12]"
-          autoPlay
-          loop
-          muted
-          playsInline
-          referrerPolicy="no-referrer"
-        />
-        {/* Soft, dark dramatic vignettes masks */}
-        <div className="absolute inset-0 bg-gradient-to-t from-black via-black/35 to-black z-1" />
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(115,10,10,0.22)_0%,transparent_100%)] z-1" />
-      </div>
+     {/* FUNDO DA VINHETA */}
+<div
+  id="portal_espiritual"
+  className="absolute inset-0 z-0 overflow-hidden pointer-events-none select-none"
+>
+  <video
+    id="vinhete_video"
+    src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
+    className="w-full h-full object-cover"
+    autoPlay
+    loop
+    muted
+    playsInline
+    referrerPolicy="no-referrer"
+  />
+</div>
 
-      {/* PARTICULAS ENERGETICAS */}
-      <div id="particulas_energeticas" className="absolute inset-0 z-1 pointer-events-none overflow-hidden select-none">
-        {Array.from({ length: 18 }).map((_, i) => {
-          const randWidth = 4 + Math.random() * 8;
-          const randLeft = Math.random() * 100;
-          const randDuration = 10 + Math.random() * 15;
-          const randDelay = Math.random() * 12;
-          return (
-            <div
-              key={i}
-              className="energy-ember"
-              style={{
-                width: `${randWidth}px`,
-                height: `${randWidth}px`,
-                left: `${randLeft}%`,
-                animationDuration: `${randDuration}s`,
-                animationDelay: `-${randDelay}s`,
-              }}
-            />
-          );
-        })}
-      </div>
+{/* PARTICULAS ENERGETICAS */}
+<div id="particulas_energeticas" className="absolute inset-0 z-1 pointer-events-none overflow-hidden select-none">
+  {Array.from({ length: 18 }).map((_, i) => {
+    const randWidth = 4 + Math.random() * 8;
+    const randLeft = Math.random() * 100;
+    const randDuration = 10 + Math.random() * 15;
+    const randDelay = Math.random() * 12;
+    return (
+      <div
+        key={i}
+        className="energy-ember"
+        style={{
+          width: `${randWidth}px`,
+          height: `${randWidth}px`,
+          left: `${randLeft}%`,
+          animationDuration: `${randDuration}s`,
+          animationDelay: `-${randDelay}s`,
+        }}
+      />
+    );
+  })}
+</div>
 
       {/* NEVOA MISTICA */}
       <div id="nevoa_mistica" className="absolute inset-x-0 bottom-0 h-44 bg-gradient-to-t from-black via-black/85 to-transparent pointer-events-none z-2 select-none" />
@@ -414,9 +450,11 @@ setUser({
       {/* ========================================== */}
       {/* ÁREA PRINCIPAL                             */}
       {/* ========================================== */}
+
+
       <section className="flex-1 lg:h-full flex flex-col items-center justify-center relative z-20 px-4 sm:px-6 pt-24 pb-8 lg:py-16 max-w-7xl mx-auto w-full transition-all">
 
-        {/* AVATAR EXU CINEMATOGRAFICO */}
+{/* AVATAR EXU CINEMATOGRAFICO */}
         <div id="avatar_exu_cinematografico" className="relative shrink-0 flex items-center justify-center select-none w-[180px] h-[180px] sm:w-[240px] sm:h-[240px] lg:w-[300px] lg:h-[300px] my-1.5 sm:my-3 lg:my-0 transition-all origin-center">
           
           {/* External decorative spinning map rings */}
@@ -433,15 +471,29 @@ setUser({
             loading ? "scale-95 shadow-[0_0_75px_rgba(220,38,38,0.6)] bg-gradient-to-b from-red-500 to-amber-600" : "hover:scale-105"
           }`}>
             <div className="w-full h-full rounded-full overflow-hidden bg-zinc-950 border border-black relative">
-              <video
-                src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
-                className="w-full h-full object-cover filter brightness-[0.7] contrast-[1.15]"
-                autoPlay
-                loop
-                muted
-                playsInline
-                referrerPolicy="no-referrer"
-              />
+ <img
+  src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/ChatGPT-Image-29-de-mai.-de-2026-09_27_07.png"
+  alt="Exu Responde"
+  className="absolute inset-0 w-full h-full object-cover"
+  referrerPolicy="no-referrer"
+/>
+
+
+             
+<video
+  src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
+  className="relative z-10 w-full h-full object-cover filter brightness-[0.7] contrast-[1.15]"
+  autoPlay
+  loop
+  muted
+  playsInline
+  preload="auto"
+  controls={false}
+  disablePictureInPicture
+  referrerPolicy="no-referrer"
+/>
+
+
               {/* Volumetric red smoke flare overlay */}
               <div className="absolute inset-0 bg-gradient-to-t from-red-950/40 via-transparent to-transparent pointer-events-none" />
               
@@ -468,7 +520,9 @@ setUser({
         </p>
 
         {/* CHAT ESTILO GPT */}
-        <div className="w-full max-w-3xl mt-4 sm:mt-6 flex flex-col h-[calc(100vh-320px)] min-h-[350px] sm:h-[480px] lg:h-[48vh] bg-zinc-950/40 border border-zinc-900/60 rounded-3xl p-3 sm:p-4 shadow-[0_20px_50px_rgba(0,0,0,0.92)] backdrop-blur-md relative z-10">
+        
+
+<div className="w-full max-w-3xl mt-4 sm:mt-6 flex flex-col h-[calc(100vh-320px)] min-h-[350px] sm:h-[480px] lg:h-[48vh] bg-zinc-950/40 border border-zinc-900/60 rounded-3xl p-3 sm:p-4 shadow-[0_20px_50px_rgba(0,0,0,0.92)] backdrop-blur-md relative z-10">
 
           <div id="chat_container" className="flex-1 overflow-y-auto pr-1 space-y-4 scrolling-pane select-text">
             
@@ -622,20 +676,22 @@ setUser({
                 <span className="truncate">RECARGA (+AXÉ)</span>
               </button>
 
+
+
+
 <button
   type="button"
   onClick={() => {
     AudioEngine.playCrystalBell();
-    window.open(
-      "https://chat.whatsapp.com/Lo8Tu80EZArLcZAHF5YfIu",
-      "_blank"
-    );
+    setShowSupportModal(true);
   }}
   className="w-full sm:flex-1 px-1.5 py-2.5 rounded-xl bg-zinc-950 hover:bg-green-950/20 border border-zinc-900 hover:border-green-500/30 text-[10px] sm:text-xs font-mono font-bold inline-flex items-center justify-center gap-1 sm:gap-1.5 cursor-pointer text-green-400 transition-all"
 >
   <HelpCircle className="w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0" />
   <span className="truncate">SUPORTE</span>
 </button>
+
+
 
 
               {user.role === "admin" && (
@@ -736,14 +792,14 @@ setUser({
           >
             <div className="absolute inset-0 select-none pointer-events-none opacity-40 bg-[radial-gradient(circle_at_center,rgba(115,10,10,0.4)_0%,transparent_100%)]">
               <video
-                src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
-                className="w-full h-full object-cover filter brightness-[0.2]"
-                autoPlay
-                loop
-                muted
-                playsInline
-                referrerPolicy="no-referrer"
-              />
+  src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
+  className="w-full h-full object-cover filter brightness-[0.7] contrast-[1.15]"
+  autoPlay
+  loop
+  muted
+  playsInline
+  referrerPolicy="no-referrer"
+/>
             </div>
             
             <div className="relative w-full max-w-lg z-10">
@@ -908,8 +964,59 @@ setUser({
           </motion.div>
         )}
 
-      </AnimatePresence>
 
+{showSupportModal && (
+  <motion.div
+    initial={{ opacity: 0 }}
+    animate={{ opacity: 1 }}
+    exit={{ opacity: 0 }}
+    className="fixed inset-0 z-[99999] bg-black/85 backdrop-blur-md flex items-center justify-center p-4"
+  >
+    <div className="w-full max-w-sm rounded-3xl border border-yellow-500/30 bg-zinc-950 p-5 shadow-[0_0_35px_rgba(234,179,8,0.25)]">
+      <h2 className="mb-5 text-center text-lg font-black text-yellow-400 tracking-widest">
+        SUPORTE
+      </h2>
+
+      <button
+        type="button"
+        onClick={() =>
+          window.open(
+            "https://chat.whatsapp.com/JqXdWPrCVxz1NC9dXyMdso?s=cl&p=a&ilr=2&amv=1",
+            "_blank"
+          )
+        }
+        className="mb-4 w-full rounded-2xl bg-green-600 py-4 font-bold text-white"
+      >
+        🟢 Entrar no WhatsApp
+      </button>
+
+      <button
+        type="button"
+        onClick={() =>
+          window.open(
+            "https://t.me/+EOUhr0Xa2_00NDQ5",
+            "_blank"
+          )
+        }
+        className="mb-4 w-full rounded-2xl bg-sky-600 py-4 font-bold text-white"
+      >
+        🔵 Entrar no Telegram
+      </button>
+
+      <button
+        type="button"
+        onClick={() => setShowSupportModal(false)}
+        className="w-full rounded-2xl bg-red-700 py-3 font-bold text-white"
+      >
+        Fechar
+      </button>
+    </div>
+  </motion.div>
+)}
+
+
+
+      </AnimatePresence>
     </main>
   );
 }

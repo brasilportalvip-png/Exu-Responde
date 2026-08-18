@@ -60,6 +60,213 @@ function getGeminiClient(): GoogleGenAI {
   return geminiClientCache;
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+// ======================================================
+// MODELOS GEMINI — ORDEM DE PRIORIDADE E FALLBACK
+// ======================================================
+
+const GEMINI_MODELS = [
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+] as const;
+
+type GeminiModelName = (typeof GEMINI_MODELS)[number];
+
+type GeminiSafeResult = {
+  text: string;
+  model: GeminiModelName;
+};
+
+const GEMINI_REQUEST_TIMEOUT_MS = 45_000;
+const GEMINI_MAX_RETRIES_PER_MODEL = 2;
+const GEMINI_RETRY_BASE_DELAY_MS = 1_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getGeminiErrorStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+
+  const geminiError = error as {
+    status?: number;
+    code?: number;
+    response?: {
+      status?: number;
+    };
+  };
+
+  return (
+    geminiError.status ??
+    geminiError.code ??
+    geminiError.response?.status ??
+    null
+  );
+}
+
+function isRetryableGeminiError(error: unknown): boolean {
+  const status = getGeminiErrorStatus(error);
+
+  if ([408, 429, 500, 502, 503, 504].includes(status ?? 0)) {
+    return true;
+  }
+
+  const message =
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : String(error).toLowerCase();
+
+  return (
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("network") ||
+    message.includes("fetch failed") ||
+    message.includes("socket") ||
+    message.includes("connection") ||
+    message.includes("rate limit") ||
+    message.includes("resource exhausted") ||
+    message.includes("temporarily unavailable") ||
+    message.includes("service unavailable")
+  );
+}
+
+async function withGeminiTimeout<T>(
+  request: Promise<T>,
+  timeoutMs = GEMINI_REQUEST_TIMEOUT_MS
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(
+        new Error(
+          `Gemini excedeu o limite de ${Math.round(timeoutMs / 1000)} segundos.`
+        )
+      );
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([request, timeoutPromise]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function generateWithGeminiFallback(params: {
+  contents: any;
+  systemInstruction: string;
+}): Promise<GeminiSafeResult> {
+  const ai = getGeminiClient();
+  const errors: string[] = [];
+
+  for (const model of GEMINI_MODELS) {
+    for (
+      let attempt = 1;
+      attempt <= GEMINI_MAX_RETRIES_PER_MODEL;
+      attempt++
+    ) {
+      try {
+        console.log(
+          `[GEMINI] Modelo=${model} tentativa=${attempt}/${GEMINI_MAX_RETRIES_PER_MODEL}`
+        );
+
+        const response = await withGeminiTimeout(
+          ai.models.generateContent({
+            model,
+            contents: params.contents,
+            config: {
+              systemInstruction: params.systemInstruction,
+            },
+          })
+        );
+
+        const text =
+          typeof response?.text === "string"
+            ? response.text.trim()
+            : "";
+
+        if (!text) {
+          throw new Error(`O modelo ${model} retornou resposta vazia.`);
+        }
+
+        console.log(`[GEMINI] Resposta concluída por ${model}.`);
+
+        return {
+          text,
+          model,
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
+
+        const retryable = isRetryableGeminiError(error);
+
+        errors.push(`${model}, tentativa ${attempt}: ${message}`);
+
+        console.error(
+          `[GEMINI] Falha no modelo ${model}, tentativa ${attempt}:`,
+          error
+        );
+
+        const canRetry =
+          retryable &&
+          attempt < GEMINI_MAX_RETRIES_PER_MODEL;
+
+        if (!canRetry) {
+          break;
+        }
+
+        const exponentialDelay =
+          GEMINI_RETRY_BASE_DELAY_MS *
+          Math.pow(2, attempt - 1);
+
+        const jitter = Math.floor(Math.random() * 500);
+
+        await sleep(exponentialDelay + jitter);
+      }
+    }
+
+    console.warn(`[GEMINI] Mudando do modelo ${model} para o próximo.`);
+  }
+
+  console.error("[GEMINI] Todos os modelos falharam:", errors);
+
+  throw new Error(
+    "Todos os modelos Gemini estão temporariamente indisponíveis."
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
 // Low-cost fallback logic if Gemini fails or is unconfigured to preserve premium interface
 
 function getBrazilDateTime(): any {
@@ -1830,41 +2037,49 @@ Você DEVE estruturar o relatório obrigatoriamente utilizando Markdown com as s
 
 Importante: Termine obrigatoriamente com a seguinte declaração em caixa ou caixa de aviso: "Todas as interpretações deste portal são puramente, culturais, literárias, de autoconhecimento educacional e espiritualidade. Jamais constituem promessas garantidas, verdades fáticas irrefutáveis ou aconselhamentos profissionais (médico/jurídico)."`;
 
-    try {
-  const response = await ai.models.generateContent({
-    model: "gemini-3.5-flash",
+   
+
+
+
+
+
+
+let aiInterpretation = "";
+
+try {
+  const geminiResult = await generateWithGeminiFallback({
     contents: prompt,
-    config: {
-      systemInstruction:
-        "Você é Exu falando pelo Tarot dos Caminhos. Use obrigatoriamente as cartas sorteadas e suas traduções oficiais. Responda como leitura espiritual, não como aula.",
-      temperature: 0.82
-    }
+    systemInstruction:
+      "Você é Exu falando pelo Tarot dos Caminhos. Use obrigatoriamente as cartas sorteadas e suas traduções oficiais. Responda como leitura espiritual, não como aula.",
   });
 
-  aiInterpretation = response.text || "";
+  aiInterpretation = geminiResult.text;
 
-} catch (flashErr) {
-  console.error("Gemini Flash failed in Tarot, trying Flash Lite:", flashErr);
+  console.log(
+    `[TAROT INICIAL] Resposta gerada pelo modelo ${geminiResult.model}.`
+  );
+} catch (geminiError) {
+  console.error(
+    "[TAROT INICIAL] Todos os modelos Gemini falharam:",
+    geminiError
+  );
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3.1-flash-lite",
-    contents: prompt,
-    config: {
-      systemInstruction:
-        "Você é Exu falando pelo Tarot dos Caminhos. Use obrigatoriamente as cartas sorteadas e suas traduções oficiais. Responda como leitura espiritual, não como aula.",
-      temperature: 0.82
-    }
-  });
-
-  aiInterpretation = response.text || "";
+  aiInterpretation =
+    TEMPLE_FALLBACKS[
+      Math.floor(Math.random() * TEMPLE_FALLBACKS.length)
+    ];
 }
 
-if (!aiInterpretation) {
-  aiInterpretation = TEMPLE_FALLBACKS[0];
-}
+readingReport = fixPortugueseEncoding(aiInterpretation);
 
 
-    readingReport = fixPortugueseEncoding(response.text || "");
+
+
+
+
+
+
+
 
 
   } catch (err) {
@@ -1947,19 +2162,18 @@ app.get("/api/user/profile", async (req, res) => {
     return res.status(404).json({ error: "Buscador não encontrado." });
   }
 
-  const db = loadDb();
 
-  const userChats = db.messages
-    .filter((m: any) => m.userId === userId)
-    .slice(-50);
-
-  res.json({
+  return res.json({
     user: {
       id: userDoc.id,
-      ...userDoc.data()
+      ...userDoc.data(),
     },
-    chats: userChats
+    chats: [],
   });
+
+
+
+  
 });
 
 
@@ -2437,43 +2651,47 @@ FORMATO:
 
 `;
 
-let response;
+
+
+
+
+
+
 
 try {
-  response = await ai.models.generateContent({
-    model: "gemini-3.5-flash",
+  const geminiResult = await generateWithGeminiFallback({
     contents: prompt,
-    config: {
-      systemInstruction:
-        "Você é Exu falando pelo Tarot dos Caminhos. Use obrigatoriamente as cartas sorteadas e suas traduções oficiais. Responda como leitura espiritual, não como aula.",
-      temperature: 0.82
-    }
+    systemInstruction:
+      "Você é Exu falando pelo Tarot dos Caminhos. Use obrigatoriamente as cartas sorteadas e suas traduções oficiais. Responda como leitura espiritual, não como aula.",
   });
-} catch (flashErr) {
-  console.error("Tarot Flash failed, trying Flash Lite:", flashErr);
 
-  try {
-    response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
-      contents: prompt,
-      config: {
-        systemInstruction:
-          "Você é Exu falando pelo Tarot dos Caminhos. Use obrigatoriamente as cartas sorteadas e suas traduções oficiais. Responda como leitura espiritual, não como aula.",
-        temperature: 0.82
-      }
-    });
-  } catch (liteErr) {
-    console.error("Tarot Flash Lite failed:", liteErr);
+  aiInterpretation = geminiResult.text;
 
-    response = {
-      text: TEMPLE_FALLBACKS[
-        Math.floor(Math.random() * TEMPLE_FALLBACKS.length)
-      ]
-    };
-  }
+  console.log(
+    `[TAROT] Modelo utilizado: ${geminiResult.model}`
+  );
+
+} catch (error) {
+
+  console.error(
+    "[TAROT] Todos os modelos Gemini falharam:",
+    error
+  );
+
+  aiInterpretation =
+    TEMPLE_FALLBACKS[
+      Math.floor(Math.random() * TEMPLE_FALLBACKS.length)
+    ];
 }
 
-aiInterpretation = response?.text || TEMPLE_FALLBACKS[0];
+
+
+
+
+
+
+
+
 
 
 } catch (err: any) {
@@ -2614,31 +2832,47 @@ FORMATO:
 `;
 
 
-   let response;
+   
+
+
+
+
+
 
 try {
-  response = await ai.models.generateContent({
-    model: "gemini-3.5-flash",
+  const geminiResult = await generateWithGeminiFallback({
     contents: prompt,
-    config: {
-      systemInstruction: "...",
-      temperature: 0.82
-    }
+    systemInstruction:
+      "Você é Exu realizando uma leitura de Numerologia Ancestral. Use obrigatoriamente os números calculados no prompt. Responda de forma espiritual, humana, direta e reflexiva, sem apresentar a leitura como verdade absoluta.",
   });
-} catch (flashErr) {
-  console.error("Numerologia Flash failed:", flashErr);
 
-  response = await ai.models.generateContent({
-    model: "gemini-3.1-flash-lite",
-    contents: prompt,
-    config: {
-      systemInstruction: "...",
-      temperature: 0.82
-    }
-  });
+  analysis = geminiResult.text;
+
+  console.log(
+    `[NUMEROLOGIA] Modelo utilizado: ${geminiResult.model}`
+  );
+} catch (error) {
+  console.error(
+    "[NUMEROLOGIA] Todos os modelos Gemini falharam:",
+    error
+  );
+
+  analysis =
+    `Seus números da sorte revelam um Caminho de Destino de força ${numDetails.destinyNumber} ` +
+    `e uma Expressão Cósmica ${numDetails.expressionNumber}. ` +
+    `Isto indica que os ventos do elemento ${numDetails.element} estão soprando direções favoráveis ` +
+    `para expansão de seus projetos íntimos. ${TEMPLE_FALLBACKS[2]}`;
 }
 
-analysis = response?.text || "Frequências calculadas com sucesso."; 
+
+
+
+
+
+
+
+
+ 
 
 
   } catch (err: any) {
@@ -2688,64 +2922,7 @@ app.post("/api/oraculo/astrologia", async (req, res) => {
   } as any;
 
 
-if (isOnlySocialMessage) {
-  const userMsgId = "msg_u_" + Date.now();
-  const botMsgId = "msg_b_" + (Date.now() + 1);
-
-  let quickText = "Salve. Você chegou até mim, mas ainda não disse o que procura. É amor, dinheiro, caminho ou resposta espiritual?";
-
-  if (normalizedText.includes("bom dia")) {
-    quickText = "Bom dia. Que seus caminhos se abram com firmeza, clareza e proteção. Diga, o que você busca hoje?";
-  } else if (normalizedText.includes("boa tarde")) {
-    quickText = "Boa tarde. A tarde traz movimento, escolha e consequência. Diga, qual caminho você quer olhar agora?";
-  } else if (normalizedText.includes("boa noite")) {
-    quickText = "Boa noite. Que a noite aquiete sua mente e revele o que estava escondido. O que pesa no seu pensamento?";
-  } else if (isAskingWell) {
-    quickText = "Estou firme na encruzilhada. Os caminhos se movem, as respostas chegam no tempo certo. E você, como está por dentro?";
-  } else if (isThanks) {
-    quickText = "Recebo sua gratidão. Caminho bom também se firma com respeito. Quando precisar, volte e pergunte.";
-  } else if (isGoodbye) {
-    quickText = "Siga em paz. Que seus caminhos fiquem abertos e sua cabeça firme. Quando precisar, volte à encruzilhada.";
-  }
-
-  db.messages.push({
-    id: userMsgId,
-    userId: user.id,
-    sender: "user",
-    text,
-    timestamp: new Date().toISOString()
-  });
-
-  db.messages.push({
-    id: botMsgId,
-    userId: user.id,
-    sender: "exu",
-    text: quickText,
-    timestamp: new Date().toISOString()
-  });
-
-  return res.json({
-    success: true,
-    userMessage: {
-      id: userMsgId,
-      sender: "user",
-      text,
-      timestamp: new Date().toISOString()
-    },
-    exuMessage: {
-      id: botMsgId,
-      sender: "exu",
-      text: quickText,
-      timestamp: new Date().toISOString()
-    },
-    creditsLeft: user.credits,
-    xpAwarded: 0,
-    newLevel: user.level
-  });
-}
-
-
-  const birthDate = req.body.birthDate || user.birthDate;
+const birthDate = req.body.birthDate || user.birthDate;
 
   if (!birthDate) {
     return res.status(400).json({ error: "Informe sua data de nascimento." });
@@ -2793,39 +2970,49 @@ Não responda como professor.
 Fale como Exu lendo os astros, os caminhos e o perfil espiritual.
 `;
 
-    try {
-      response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: {
-          systemInstruction: "Você é Exu realizando leitura de Astrologia Ancestral.",
-          temperature: 0.82
-        }
-      });
-    } catch (flashErr) {
-      console.error("Astrologia Flash failed:", flashErr);
+    
 
-      try {
-        response = await ai.models.generateContent({
-          model: "gemini-3.1-flash-lite",
-          contents: prompt,
-          config: {
-            systemInstruction: "Você é Exu realizando leitura de Astrologia Ancestral.",
-            temperature: 0.82
-          }
-        });
-      } catch (liteErr) {
-        console.error("Astrologia Flash Lite failed:", liteErr);
 
-        response = {
-          text: TEMPLE_FALLBACKS[
-            Math.floor(Math.random() * TEMPLE_FALLBACKS.length)
-          ]
-        };
-      }
-    }
 
-    analysis = response?.text || TEMPLE_FALLBACKS[0];
+
+
+
+
+try {
+  const geminiResult = await generateWithGeminiFallback({
+    contents: prompt,
+    systemInstruction:
+      "Você é Exu realizando leitura de Astrologia Ancestral.",
+  });
+
+  analysis = geminiResult.text;
+
+  console.log(
+    `[ASTROLOGIA] Modelo utilizado: ${geminiResult.model}`
+  );
+
+} catch (error) {
+
+  console.error(
+    "[ASTROLOGIA] Todos os modelos Gemini falharam:",
+    error
+  );
+
+  analysis =
+    TEMPLE_FALLBACKS[
+      Math.floor(Math.random() * TEMPLE_FALLBACKS.length)
+    ];
+}
+
+
+
+
+
+
+
+
+
+
 
   } catch (err: any) {
     console.error("Astrologia failed:", err);
@@ -3339,17 +3526,27 @@ if (isOnlySocialMessage) {
 
 const shouldChargeCredit = !isOnlySocialMessage;
 
+const consultationType = req.body.type || "comum";
+
+const creditsCost =
+  consultationType === "completa"
+    ? 3
+    : consultationType === "outros"
+      ? 2
+      : 1;
+
 // Validate Credits
-if (shouldChargeCredit && Number(user.credits || 0) < 1) {
+if (shouldChargeCredit && Number(user.credits || 0) < creditsCost) {
   return res.status(400).json({
-    error: "Seus créditos de Axé acabaram. Adquira mais créditos para continuar sua jornada de questionamento."
+    error: `Você precisa de ${creditsCost} crédito(s) de Axé para esta consulta.`
   });
 }
 
 // Deduct Credit & Award XP
 if (shouldChargeCredit) {
-  const newCredits = Number(user.credits || 0) - 1;
-  const newXp = Number(user.xp || 0) + 15;
+  const newCredits = Number(user.credits || 0) - creditsCost;
+  const xpAwarded = creditsCost * 15;
+  const newXp = Number(user.xp || 0) + xpAwarded;
   const { level } = checkXpLevel(newXp);
 
   await userRef.update({
@@ -4075,8 +4272,50 @@ ${recentMessages}
 `
   : "";
 
+const consultationType = req.body.type || "comum";
+
+const responseDepthInstruction =
+  consultationType === "completa"
+    ? `
+TIPO DE CONSULTA: CONSULTA COMPLETA — 3 CRÉDITOS
+
+REGRAS DE PROFUNDIDADE:
+- Entregue uma consulta premium, profunda e detalhada.
+- Use entre 8 e 12 parágrafos.
+- Analise situação atual, tendências, bloqueios, oportunidades e caminhos.
+- Utilize conhecimentos de Ifá, Odù, Exu, Orixás, arquétipos e fundamentos presentes no acervo.
+- Apresente interpretações ricas, mas sem afirmar fatos absolutos.
+- Finalize sempre com orientação prática e espiritual.
+- A resposta deve transmitir valor claramente superior às demais modalidades.
+`
+    : consultationType === "outros"
+      ? `
+TIPO DE CONSULTA: SOBRE OUTRA PESSOA — 2 CRÉDITOS
+
+REGRAS DE PROFUNDIDADE:
+- Entregue uma leitura intermediária.
+- Use entre 5 e 7 parágrafos.
+- Foque na energia, comportamento, momento atual e tendências da outra pessoa.
+- Analise a conexão entre o consulente e essa pessoa.
+- Apresente orientação prática.
+- Não entregue uma consulta tão profunda quanto a modalidade completa.
+`
+      : `
+TIPO DE CONSULTA: PERGUNTA COMUM — 1 CRÉDITO
+
+REGRAS DE PROFUNDIDADE:
+- Responda de forma objetiva.
+- Use entre 2 e 4 parágrafos.
+- Vá direto ao ponto principal da pergunta.
+- Entregue apenas leitura principal, alerta e conselho.
+- Evite aprofundamentos extensos.
+- Não transforme uma pergunta simples em consulta completa.
+`;
+
 const userMessagePayload = `
 ${conversationContext}
+
+${responseDepthInstruction}
 
 PERGUNTA ATUAL DO CONSULENTE ${user.name}:
 "${text}"
@@ -4084,6 +4323,9 @@ PERGUNTA ATUAL DO CONSULENTE ${user.name}:
 Use o histórico recente para entender continuidade, emoção e contexto.
 Não repita respostas anteriores.
 Não trate a pergunta atual como isolada se ela continuar o assunto anterior.
+
+OBEDEÇA RIGOROSAMENTE O TIPO DE CONSULTA.
+A profundidade da resposta deve corresponder ao número de créditos pagos.
 `;
 
 const lowerText = text.toLowerCase();
@@ -4108,10 +4350,17 @@ const hasBirthDate =
   /\bnascid[ao]\b/i.test(text);
 
 const hasOtherPersonName =
-  /\bcom\s+[a-záàâãéêíóôõúç]+/i.test(text) ||
-  /\bde\s+[a-záàâãéêíóôõúç]+/i.test(text);
+  /[A-Za-zÀ-ÿ]{2,}\s+[A-Za-zÀ-ÿ]{2,}/.test(text);
 
-if (isLoveQuestion && (!hasOtherPersonName || !hasBirthDate)) {
+
+if (
+  consultationType === "outros" &&
+  isLoveQuestion &&
+  (!hasOtherPersonName || !hasBirthDate)
+) {
+
+
+
   return res.json({
     success: true,
     userMessage: {
@@ -4132,45 +4381,44 @@ if (isLoveQuestion && (!hasOtherPersonName || !hasBirthDate)) {
 }
 
 
-let response;
+
+
+
+
+
 
 try {
-  response = await ai.models.generateContent({
-    model: "gemini-3.5-flash",
+  const geminiResult = await generateWithGeminiFallback({
     contents: userMessagePayload,
-    config: {
-      systemInstruction: systemPromptInstruction,
-      temperature: 0.82
-    }
+    systemInstruction: systemPromptInstruction,
   });
-} catch (flashErr) {
-  console.error("Gemini 3.5 Flash failed, trying Flash Lite:", flashErr);
 
-  try {
-    response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
-      contents: userMessagePayload,
-      config: {
-        systemInstruction: systemPromptInstruction,
-        temperature: 0.82
-      }
-    });
-  } catch (liteErr) {
-    console.error("Gemini 3.5 Flash Lite failed:", liteErr);
+  finalResponseText = fixPortugueseEncoding(geminiResult.text);
 
-    response = {
-      text: TEMPLE_FALLBACKS[
-        Math.floor(Math.random() * TEMPLE_FALLBACKS.length)
-      ]
-    };
-  }
+  console.log(
+    `[CHAT] Modelo utilizado: ${geminiResult.model}`
+  );
+} catch (error) {
+  console.error(
+    "[CHAT] Todos os modelos Gemini falharam:",
+    error
+  );
+
+  finalResponseText = fixPortugueseEncoding(
+    TEMPLE_FALLBACKS[
+      Math.floor(Math.random() * TEMPLE_FALLBACKS.length)
+    ]
+  );
 }
 
 
 
-  finalResponseText = fixPortugueseEncoding(
-  response.text || TEMPLE_FALLBACKS[Math.floor(Math.random() * TEMPLE_FALLBACKS.length)]
-);
+
+
+
+
+
+
 
 
 
