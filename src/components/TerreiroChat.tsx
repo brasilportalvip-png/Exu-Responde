@@ -41,7 +41,7 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
           id: "welcome_msg",
           userId: user.id,
           sender: "exu",
-          text: `Laroyé, ${user.name}! Sou Exu Responde, guardião dos caminhos e detentor dos saberes de Ifá. Traga-me as tormentas de sua mente, mostre-me suas encruzilhadas corporais ou intelectuais e buscaremos o axé da clareza juntos. Cada conselho consome 1 crédito de axé e nutre seu espírito em +15 XP.`,
+          text: `Laroyé, ${user.name}! Sou Exu Responde, guardião dos caminhos e detentor dos saberes de Ifá. Traga-me as tormentas de sua mente, mostre-me suas encruzilhadas corporais ou intelectuais e buscaremos o axé da clareza juntos. Cada pergunta consome 5 créditos de axé e nutre seu espírito em +15 XP.`,
           timestamp: new Date().toISOString()
         }
       ]);
@@ -54,7 +54,7 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
 
   const handleSendMessage = async (textToSend: string) => {
     if (!textToSend.trim()) return;
-    const requiredCredits = consultationType === "completa" ? 3 : (consultationType === "outros" ? 2 : 1);
+    const requiredCredits = 5;
     if (user.credits < requiredCredits) {
       AudioEngine.playPortalSwoosh();
       openCreditsMenu();
@@ -266,7 +266,7 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
                     {msg.id === "welcome_msg" ? null : (
                       <>
                         <span className="text-zinc-600">•</span>
-                        <span className="text-yellow-600 uppercase font-bold">{isExu ? "-1 CRÉDITO AXÉ" : "+15 XP"}</span>
+                        <span className="text-yellow-600 uppercase font-bold">{isExu ? "-5 CRÉDITOS AXÉ" : "+15 XP"}</span>
                       </>
                     )}
                   </div>
@@ -318,43 +318,6 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
 
       {/* Chat bottom input controller */}
       <div className="p-4 bg-zinc-950 border-t border-red-950/50">
-        {/* Selection of consultation type */}
-        <div className="flex gap-1.5 mb-3 overflow-x-auto pb-1 select-none scrollbar-none">
-          <button
-            type="button"
-            onClick={() => setConsultationType("comum")}
-            className={`px-3 py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-              consultationType === "comum"
-                ? "bg-yellow-500 text-black border-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.2)]"
-                : "bg-black text-zinc-400 border-zinc-900 hover:border-zinc-800 hover:text-zinc-200"
-            }`}
-          >
-            Pergunta comum (01 crédito)
-          </button>
-          <button
-            type="button"
-            onClick={() => setConsultationType("outros")}
-            className={`px-3 py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-              consultationType === "outros"
-                ? "bg-yellow-500 text-black border-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.2)]"
-                : "bg-black text-zinc-400 border-zinc-900 hover:border-zinc-800 hover:text-zinc-200"
-            }`}
-          >
-            Sobre outra pessoa (02 créditos)
-          </button>
-          <button
-            type="button"
-            onClick={() => setConsultationType("completa")}
-            className={`px-3 py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-              consultationType === "completa"
-                ? "bg-yellow-500 text-black border-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.2)]"
-                : "bg-black text-zinc-400 border-zinc-900 hover:border-zinc-800 hover:text-zinc-200"
-            }`}
-          >
-            Consulta completa (03 créditos)
-          </button>
-        </div>
-
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -368,7 +331,7 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
             value={inputText}
             disabled={loading}
             onChange={(e) => setInputText(e.target.value)}
-            placeholder={user.credits < (consultationType === "completa" ? 3 : (consultationType === "outros" ? 2 : 1)) ? `Você precisa de pelo menos ${consultationType === "completa" ? 3 : (consultationType === "outros" ? 2 : 1)} créditos para esta consulta...` : "Digite sua dúvida espiritual ou filosófica..."}
+            placeholder={user.credits < 5 ? "Você precisa de pelo menos 5 créditos para esta pergunta..." : "Digite sua dúvida espiritual ou filosófica..."}
             className="flex-1 px-4 py-3 border border-red-950 bg-black rounded-xl text-amber-100 placeholder-zinc-700 focus:outline-none focus:border-yellow-600/60 focus:ring-1 focus:ring-yellow-600/60 transition-all text-sm font-sans autofill:bg-black"
           />
           <button
@@ -383,7 +346,7 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
 
         <div className="flex items-center justify-between text-[10px] font-mono text-zinc-500 mt-2.5 px-1 uppercase tracking-wide">
           <span>🛡️ Consultas seguras e encriptadas</span>
-          <span className="text-yellow-600/80 font-semibold">• Custo: {consultationType === "completa" ? "3 créditos" : (consultationType === "outros" ? "2 créditos" : "1 crédito")}</span>
+          <span className="text-yellow-600/80 font-semibold">• Custo: 5 créditos</span>
         </div>
       </div>
 

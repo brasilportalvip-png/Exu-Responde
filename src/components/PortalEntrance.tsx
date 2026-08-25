@@ -15,6 +15,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { Sparkles, CheckCircle, Compass, LogIn, Volume2, VolumeX, Flame, User, Mail, Calendar, Clock, MapPin, Lock, Eye, EyeOff } from "lucide-react";
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile } from "../types";
+import { parseApiResponse } from "../api";
 
 interface PortalEntranceProps {
   onLoginSuccess: (user: UserProfile) => void;
@@ -149,7 +150,10 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
         })
       });
 
-      const backendData = await backendRes.json();
+            const backendData = await parseApiResponse<{
+        user?: UserProfile;
+        error?: string;
+      }>(backendRes);
 
       if (!backendRes.ok) {
         try {
@@ -241,7 +245,10 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
         })
       });
 
-      const backendData = await backendRes.json();
+            const backendData = await parseApiResponse<{
+        user?: UserProfile;
+        error?: string;
+      }>(backendRes);
 
       if (!backendRes.ok || !backendData.user) {
         throw new Error(
@@ -364,7 +371,10 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
         })
       });
 
-      const backendData = await backendRes.json();
+            const backendData = await parseApiResponse<{
+        user?: UserProfile;
+        error?: string;
+      }>(backendRes);
 
       if (!backendRes.ok || !backendData.user) {
         throw new Error(

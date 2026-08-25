@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { AudioEngine } from "./components/AudioEngine";
 import { UserProfile, ChatMessage } from "./types";
+import { parseApiResponse } from "./api";
 
 // Import custom built components
 import PortalEntrance from "./components/PortalEntrance";
@@ -64,6 +65,13 @@ const SESSION_KEY = "exu_responde_chat_session";
         return;
       }
 
+      if (!firebaseUser.emailVerified) {
+        setUser(null);
+        setShowEntranceModal(true);
+        setCheckedAuth(true);
+        return;
+      }
+
       try {
         const token = await firebaseUser.getIdToken();
 
@@ -78,7 +86,10 @@ const SESSION_KEY = "exu_responde_chat_session";
           })
         });
 
-        const loginData = await loginRes.json();
+        const loginData = await parseApiResponse<{
+          user?: UserProfile;
+          error?: string;
+        }>(loginRes);
 
         if (!loginRes.ok || !loginData.user) {
           throw new Error(
@@ -98,7 +109,10 @@ const SESSION_KEY = "exu_responde_chat_session";
           }
         });
 
-        const profileData = await profileRes.json();
+        const profileData = await parseApiResponse<{
+          chats?: ChatMessage[];
+          error?: string;
+        }>(profileRes);
 
         if (
           profileRes.ok &&
@@ -252,7 +266,7 @@ text: `Bem Vindo Ao Reino De Exu! Faça Sua Pergunta.`,
     }
 
     // Credits checking
-    const requiredCredits = consultationType === "completa" ? 3 : (consultationType === "outros" ? 2 : 1);
+    const requiredCredits = 5;
     if (user.credits < requiredCredits) {
       AudioEngine.playPortalSwoosh();
       setActiveModal("credits");
@@ -724,7 +738,7 @@ setUser({
       <>
         <span>•</span>
         <span className="text-yellow-500 font-bold">
-          -{msg.creditCharged} CRÉDITO AXÉ
+          -{msg.creditCharged} CRÉDITOS AXÉ
         </span>
       </>
     )}
@@ -836,43 +850,6 @@ setUser({
 
           {/* CAMPO DE PERGUNTA GPT */}
           <div className="pt-2 border-t border-zinc-900">
-            {/* Selection of consultation type */}
-            <div className="flex gap-1.5 mb-2.5 overflow-x-auto pb-1 select-none scrollbar-none">
-              <button
-                type="button"
-                onClick={() => setConsultationType("comum")}
-                className={`px-3 py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                  consultationType === "comum"
-                    ? "bg-yellow-500 text-black border-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.2)]"
-                    : "bg-black text-zinc-400 border-zinc-900 hover:border-zinc-800 hover:text-zinc-200"
-                }`}
-              >
-                Pergunta comum (01 crédito)
-              </button>
-              <button
-                type="button"
-                onClick={() => setConsultationType("outros")}
-                className={`px-3 py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                  consultationType === "outros"
-                    ? "bg-yellow-500 text-black border-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.2)]"
-                    : "bg-black text-zinc-400 border-zinc-900 hover:border-zinc-800 hover:text-zinc-200"
-                }`}
-              >
-                Sobre outra pessoa (02 créditos)
-              </button>
-              <button
-                type="button"
-                onClick={() => setConsultationType("completa")}
-                className={`px-3 py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                  consultationType === "completa"
-                    ? "bg-yellow-500 text-black border-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.2)]"
-                    : "bg-black text-zinc-400 border-zinc-900 hover:border-zinc-800 hover:text-zinc-200"
-                }`}
-              >
-                Consulta completa (03 créditos)
-              </button>
-            </div>
-
             <form onSubmit={handleSendMessage} className="flex gap-2">
               <input
                 id="campo_pergunta_gpt"
@@ -880,7 +857,7 @@ setUser({
                 value={inputText}
                 disabled={loading}
                 onChange={(e) => setInputText(e.target.value)}
-                placeholder={!user ? "Adicione sua pergunta..." : user.credits < (consultationType === "completa" ? 3 : (consultationType === "outros" ? 2 : 1)) ? `Você precisa de pelo menos ${consultationType === "completa" ? 3 : (consultationType === "outros" ? 2 : 1)} créditos para esta consulta...` : "Pergunte sobre sua vida, caminhos, Odu, numerologia, orixás, Exu, prosperidade ou espiritualidade..."}
+                placeholder={!user ? "Adicione sua pergunta..." : user.credits < 5 ? "Você precisa de pelo menos 5 créditos para esta pergunta..." : "Pergunte sobre sua vida, caminhos, Odu, numerologia, orixás, Exu, prosperidade ou espiritualidade..."}
                 className="flex-1 px-4.5 py-3.5 border border-zinc-900 bg-black/80 rounded-xl text-xs sm:text-sm text-yellow-50 placeholder-zinc-700 focus:outline-none focus:border-yellow-500/40 focus:ring-1 focus:ring-yellow-500/30 transition-all font-sans"
               />
               <button
@@ -895,7 +872,7 @@ setUser({
 
             <div className="flex items-center justify-between text-[9px] font-mono text-zinc-600 mt-2 px-1 uppercase tracking-wider select-none font-bold">
               <span>🛡️ Conexão sagrada encriptada</span>
-              <span className="text-yellow-600/70">• Custo: {consultationType === "completa" ? "3 créditos" : (consultationType === "outros" ? "2 créditos" : "1 crédito")}</span>
+              <span className="text-yellow-600/70">• Custo: 5 créditos</span>
             </div>
           </div>
 

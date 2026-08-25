@@ -9,22 +9,70 @@ import fs from "fs";
 // import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
-import admin from "firebase-admin";
+import { cert, getApps, initializeApp } from "firebase-admin/app";
+import { getAuth, type Auth, type DecodedIdToken } from "firebase-admin/auth";
+import { getFirestore, type Firestore } from "firebase-admin/firestore";
 
+dotenv.config({ path: ".env.local" });
 dotenv.config();
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n")
-    })
-  });
+const FIREBASE_ENV_KEYS = [
+  "FIREBASE_PROJECT_ID",
+  "FIREBASE_CLIENT_EMAIL",
+  "FIREBASE_PRIVATE_KEY"
+] as const;
+
+let firestore: Firestore;
+let firebaseAuth: Auth;
+let firebaseInitializationError: Error | null = null;
+
+function getMissingFirebaseEnvironmentVariables(): string[] {
+  return FIREBASE_ENV_KEYS.filter((key) => !process.env[key]?.trim());
 }
 
-const firestore = admin.firestore();
-console.log("FIRESTORE INICIALIZADO");
+function initializeFirebaseAdmin(): void {
+  if (firestore && firebaseAuth) {
+    return;
+  }
+
+  const missingVariables = getMissingFirebaseEnvironmentVariables();
+
+  if (missingVariables.length > 0) {
+    throw new Error(
+      `Firebase Admin não configurado. Variáveis ausentes: ${missingVariables.join(", ")}.`
+    );
+  }
+
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY!
+    .replace(/\\n/g, "\n")
+    .trim();
+
+  if (!privateKey.includes("BEGIN PRIVATE KEY")) {
+    throw new Error(
+      "FIREBASE_PRIVATE_KEY possui formato inválido. Informe a chave privada completa da conta de serviço."
+    );
+  }
+
+  try {
+    if (!getApps().length) {
+      initializeApp({
+        credential: cert({
+          projectId: process.env.FIREBASE_PROJECT_ID!.trim(),
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL!.trim(),
+          privateKey
+        })
+      });
+    }
+
+    firestore = getFirestore();
+    firebaseAuth = getAuth();
+    firebaseInitializationError = null;
+  } catch (error) {
+    firebaseInitializationError =
+      error instanceof Error ? error : new Error(String(error));
+    throw firebaseInitializationError;
+  }
+}
 
 const mp = new MercadoPagoConfig({
   accessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN || ""
@@ -38,6 +86,54 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+app.get("/api/health", (_req, res) => {
+  try {
+    initializeFirebaseAdmin();
+
+    return res.status(200).json({
+      status: "ok",
+      services: {
+        api: "ready",
+        firebaseAdmin: "ready"
+      }
+    });
+  } catch (error) {
+    const initializationError =
+      error instanceof Error ? error : new Error(String(error));
+
+    console.error("[FIREBASE] Falha de configuração:", initializationError.message);
+
+    return res.status(503).json({
+      status: "degraded",
+      code: "FIREBASE_ADMIN_NOT_CONFIGURED",
+      error:
+        "O servidor de autenticação está temporariamente indisponível. Verifique a configuração do Firebase Admin na Vercel.",
+      missingEnvironmentVariables: getMissingFirebaseEnvironmentVariables()
+    });
+  }
+});
+
+app.use("/api", (_req, res, next) => {
+  try {
+    initializeFirebaseAdmin();
+    return next();
+  } catch (error) {
+    const initializationError =
+      error instanceof Error ? error : new Error(String(error));
+
+    if (firebaseInitializationError?.message !== initializationError.message) {
+      firebaseInitializationError = initializationError;
+      console.error("[FIREBASE] Falha de inicialização:", initializationError.message);
+    }
+
+    return res.status(503).json({
+      code: "FIREBASE_ADMIN_NOT_CONFIGURED",
+      error:
+        "O servidor de autenticação está temporariamente indisponível. Tente novamente em alguns instantes."
+    });
+  }
+});
 
 
 // ======================================================
@@ -66,9 +162,7 @@ async function requireFirebaseAuth(
   }
 
   try {
-    const decodedToken = await admin
-      .auth()
-      .verifyIdToken(idToken);
+    const decodedToken = await firebaseAuth.verifyIdToken(idToken);
 
     (req as any).firebaseUser = decodedToken;
 
@@ -85,6 +179,100 @@ async function requireFirebaseAuth(
         "Sua sessão é inválida ou expirou. Entre novamente."
     });
   }
+}
+
+async function requirePortalUser(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  const firebaseUser =
+    (req as any).firebaseUser as DecodedIdToken | undefined;
+  const userId = String(req.headers["x-user-id"] || "").trim();
+
+  if (!firebaseUser?.uid || !userId) {
+    return res.status(401).json({
+      error: "Sessão do usuário não identificada."
+    });
+  }
+
+  try {
+    const userDoc = await firestore.collection("users").doc(userId).get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({
+        error: "Usuário não encontrado."
+      });
+    }
+
+    const userData = userDoc.data() as any;
+    const firebaseEmail =
+      typeof firebaseUser.email === "string"
+        ? firebaseUser.email.trim().toLowerCase()
+        : "";
+    const storedEmail =
+      typeof userData?.email === "string"
+        ? userData.email.trim().toLowerCase()
+        : "";
+
+    if (
+      userData?.firebaseUid &&
+      userData.firebaseUid !== firebaseUser.uid
+    ) {
+      return res.status(403).json({
+        error: "Esta sessão não pertence ao usuário informado."
+      });
+    }
+
+    if (!userData?.firebaseUid) {
+      if (!firebaseEmail || !storedEmail || firebaseEmail !== storedEmail) {
+        return res.status(403).json({
+          error: "Não foi possível validar o vínculo desta conta."
+        });
+      }
+
+      await userDoc.ref.set(
+        {
+          firebaseUid: firebaseUser.uid,
+          emailVerified: Boolean(firebaseUser.email_verified),
+          updatedAt: new Date().toISOString()
+        },
+        { merge: true }
+      );
+
+      userData.firebaseUid = firebaseUser.uid;
+    }
+
+    (req as any).portalUser = {
+      id: userDoc.id,
+      ...userData
+    };
+
+    return next();
+  } catch (error) {
+    console.error("[AUTH] Falha ao validar usuário do portal:", error);
+
+    return res.status(503).json({
+      error:
+        "Não foi possível validar sua conta neste momento. Tente novamente."
+    });
+  }
+}
+
+function requirePortalAdmin(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  const portalUser = (req as any).portalUser as { role?: string } | undefined;
+
+  if (portalUser?.role !== "admin") {
+    return res.status(403).json({
+      error: "Acesso administrativo restrito."
+    });
+  }
+
+  return next();
 }
 
 
@@ -1430,6 +1618,92 @@ function saveDb(data: any) {
   }
 }
 
+type PersistedMessage = {
+  id: string;
+  userId: string;
+  sender: "user" | "exu";
+  text: string;
+  timestamp: string;
+};
+
+async function persistMessages(messages: PersistedMessage[]): Promise<void> {
+  if (messages.length === 0) {
+    return;
+  }
+
+  const batch = firestore.batch();
+
+  for (const message of messages) {
+    const messageRef = firestore.collection("messages").doc(message.id);
+    batch.set(messageRef, message, { merge: true });
+  }
+
+  await batch.commit();
+}
+
+async function loadUserMessages(userId: string): Promise<PersistedMessage[]> {
+  const snapshot = await firestore
+    .collection("messages")
+    .where("userId", "==", userId)
+    .limit(500)
+    .get();
+
+  return snapshot.docs
+    .map((doc) => ({
+      id: doc.id,
+      ...doc.data()
+    } as PersistedMessage))
+    .sort(
+      (a, b) =>
+        new Date(a.timestamp || 0).getTime() -
+        new Date(b.timestamp || 0).getTime()
+    );
+}
+
+async function loadKnowledgeItems(): Promise<any[]> {
+  const customSnapshot = await firestore.collection("knowledge").get();
+  const itemsById = new Map<string, any>();
+
+  for (const item of DEFAULT_KNOWLEDGE) {
+    itemsById.set(item.id, item);
+  }
+
+  for (const doc of customSnapshot.docs) {
+    itemsById.set(doc.id, {
+      id: doc.id,
+      ...doc.data()
+    });
+  }
+
+  return Array.from(itemsById.values());
+}
+
+async function persistLatestActivityLog(db: any): Promise<void> {
+  const activityLog = Array.isArray(db?.logs) ? db.logs.at(-1) : null;
+
+  if (!activityLog?.id) {
+    return;
+  }
+
+  await firestore
+    .collection("activity_logs")
+    .doc(String(activityLog.id))
+    .set(activityLog, { merge: true });
+}
+
+async function loadRecentActivityLogs(): Promise<any[]> {
+  const snapshot = await firestore
+    .collection("activity_logs")
+    .orderBy("timestamp", "desc")
+    .limit(200)
+    .get();
+
+  return snapshot.docs.map((doc) => ({
+    id: doc.id,
+    ...doc.data()
+  }));
+}
+
 // Numerology Core Calculations
 function calculateNumerology(name: string, dateStr: string): any {
   const sanitize = (str: string) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
@@ -1908,7 +2182,7 @@ app.post(
       honeypot
     } = req.body;
 
-    const firebaseUser = (req as any).firebaseUser as admin.auth.DecodedIdToken;
+    const firebaseUser = (req as any).firebaseUser as DecodedIdToken;
 
     const firebaseEmail =
       typeof firebaseUser?.email === "string"
@@ -2207,23 +2481,26 @@ readingReport = fixPortugueseEncoding(aiInterpretation);
 
   // Save Leitura Inicial report in message history of the user
   const initialReadingId = "msg_init_read_" + Date.now();
-  db.messages.push({
+  const initialReadingMessage: PersistedMessage = {
     id: initialReadingId,
     userId: newUser.id,
     sender: "exu",
     text: readingReport,
     timestamp: new Date().toISOString()
-  });
+  };
 
   // Save Opening Conversation text requested in ABERTURA DA CONVERSA rules
   const firstConversationStarterId = "msg_opener_" + (Date.now() + 1);
-  db.messages.push({
+  const firstConversationMessage: PersistedMessage = {
     id: firstConversationStarterId,
     userId: newUser.id,
     sender: "exu",
     text: "Salve sua banda, filho de fé. Já observei os caminhos apresentados pelos dados que me confiou. Em que posso ajudar?",
     timestamp: new Date().toISOString()
-  });
+  };
+
+  db.messages.push(initialReadingMessage, firstConversationMessage);
+  await persistMessages([initialReadingMessage, firstConversationMessage]);
 
   db.logs.push({
     id: "log_" + Date.now(),
@@ -2233,6 +2510,7 @@ readingReport = fixPortugueseEncoding(aiInterpretation);
     timestamp: new Date().toISOString()
   });
 
+  await persistLatestActivityLog(db);
   saveDb(db);
   res.json({ success: true, user: newUser });
 });
@@ -2246,7 +2524,7 @@ app.post(
   requireFirebaseAuth,
   async (req, res) => {
     const firebaseUser =
-      (req as any).firebaseUser as admin.auth.DecodedIdToken;
+      (req as any).firebaseUser as DecodedIdToken;
 
     const firebaseEmail =
       typeof firebaseUser?.email === "string"
@@ -2338,7 +2616,7 @@ app.get(
   requireFirebaseAuth,
   async (req, res) => {
     const firebaseUser =
-      (req as any).firebaseUser as admin.auth.DecodedIdToken;
+      (req as any).firebaseUser as DecodedIdToken;
 
     const firebaseEmail =
       typeof firebaseUser?.email === "string"
@@ -2398,20 +2676,7 @@ app.get(
       );
     }
 
-    const db = loadDb();
-
-    const chats = Array.isArray(db.messages)
-      ? db.messages
-          .filter(
-            (message: any) =>
-              message.userId === userDoc.id
-          )
-          .sort(
-            (a: any, b: any) =>
-              new Date(a.timestamp || 0).getTime() -
-              new Date(b.timestamp || 0).getTime()
-          )
-      : [];
+    const chats = await loadUserMessages(userDoc.id);
 
     const refreshedUserDoc =
       await userDoc.ref.get();
@@ -2435,7 +2700,7 @@ app.post(
   requireFirebaseAuth,
   async (req, res) => {
     const firebaseUser =
-      (req as any).firebaseUser as admin.auth.DecodedIdToken;
+      (req as any).firebaseUser as DecodedIdToken;
 
     const {
       birthName,
@@ -2575,6 +2840,7 @@ app.post(
       timestamp: new Date().toISOString()
     });
 
+    await persistLatestActivityLog(db);
     saveDb(db);
 
     return res.json({
@@ -2896,7 +3162,11 @@ Sentido normal: ${card.normal}
 
 
 // API Oracle: Tarot
-app.post("/api/oraculo/tarot", async (req, res) => {
+app.post(
+  "/api/oraculo/tarot",
+  requireFirebaseAuth,
+  requirePortalUser,
+  async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
   const { question, slotsCount } = req.body; // slotsCount: 1 or 3
 
@@ -2928,7 +3198,8 @@ await userDocRef.update({
   credits: newCredits,
   xp: newXp,
   level
-});
+  }
+);
 
 user.credits = newCredits;
 user.xp = newXp;
@@ -3066,7 +3337,8 @@ db.logs.push({
   details: `Sorteio de ${slotsCount} carta(s). Cartas: ${drawn.map(c => c.nome).join(", ")}`,
   timestamp: new Date().toISOString()
 });
-        
+
+  await persistLatestActivityLog(db);
   saveDb(db);
 
   res.json({
@@ -3080,7 +3352,11 @@ newLevel: user.level
 });
 
 // API Oracle: Numerology
-app.post("/api/oraculo/numerologia", async (req, res) => {
+app.post(
+  "/api/oraculo/numerologia",
+  requireFirebaseAuth,
+  requirePortalUser,
+  async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
   if (!userId) return res.status(401).json({ error: "Sessão inválida" });
 
@@ -3119,7 +3395,8 @@ await userDocRef.update({
   credits: newCredits,
   xp: newXp,
   level
-});
+  }
+);
 
 user.credits = newCredits;
 user.xp = newXp;
@@ -3242,6 +3519,7 @@ try {
     timestamp: new Date().toISOString()
   });
 
+  await persistLatestActivityLog(db);
   saveDb(db);
 
   res.json({
@@ -3256,7 +3534,11 @@ newLevel: user.level
 
 
 // API Oracle: Astrology
-app.post("/api/oraculo/astrologia", async (req, res) => {
+app.post(
+  "/api/oraculo/astrologia",
+  requireFirebaseAuth,
+  requirePortalUser,
+  async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
 
   if (!userId) {
@@ -3385,12 +3667,17 @@ try {
       analysis
     }
   });
-});
+  }
+);
 
 
 
 // Credits shop plans buy handler - Mercado Pago
-app.post("/api/credits/buy", async (req, res) => {
+app.post(
+  "/api/credits/buy",
+  requireFirebaseAuth,
+  requirePortalUser,
+  async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
   const { planId } = req.body;
 
@@ -3471,7 +3758,8 @@ payment_methods: {
       error: "Erro ao criar pagamento no Mercado Pago."
     });
   }
-});
+  }
+);
 
 // Mercado Pago webhook - automatic credit confirmation
 app.post("/api/mercadopago/webhook", async (req, res) => {
@@ -3616,7 +3904,12 @@ app.post("/api/credits/confirm", (_req, res) => {
 });
 
 // Admin API - List Seeker Users
-app.get("/api/admin/users", async (req, res) => {
+app.get(
+  "/api/admin/users",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
 
   if (!userId) {
@@ -3636,16 +3929,22 @@ app.get("/api/admin/users", async (req, res) => {
     ...doc.data()
   }));
 
-  const db = loadDb();
+  const activityLogs = await loadRecentActivityLogs();
 
   res.json({
     seekers: users,
-    logs: db.logs
+    logs: activityLogs
   });
-});
+  }
+);
 
 // Admin API - Analytics dashboard Data
-app.get("/api/admin/analytics", async (req, res) => {
+app.get(
+  "/api/admin/analytics",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
 
   if (!userId) {
@@ -3665,29 +3964,42 @@ app.get("/api/admin/analytics", async (req, res) => {
     ...doc.data()
   })) as any[];
 
-  const db = loadDb();
+  const activityLogs = await loadRecentActivityLogs();
+  const knowledgeItems = await loadKnowledgeItems();
 
   const stats = {
     totalSeekers: users.length,
     totalCreditsInCirculation: users.reduce((acc, u) => acc + Number(u.credits || 0), 0),
     totalXpAccumulated: users.reduce((acc, u) => acc + Number(u.xp || 0), 0),
-    totalLogs: db.logs.length,
-    knowledgeItemsCount: db.knowledge.length
+    totalLogs: activityLogs.length,
+    knowledgeItemsCount: knowledgeItems.length
   };
 
   res.json({
     stats,
-    logs: db.logs.slice(-30)
+    logs: activityLogs.slice(0, 30)
   });
-});
+  }
+);
 
 // Admin API - Library Retrieve & Add (RAG Database Management)
-app.get("/api/admin/library", (req, res) => {
-  const db = loadDb();
-  res.json({ library: db.knowledge });
-});
+app.get(
+  "/api/admin/library",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (_req, res) => {
+  const knowledgeItems = await loadKnowledgeItems();
+  res.json({ library: knowledgeItems });
+  }
+);
 
-app.post("/api/admin/library/add", async (req, res) => {
+app.post(
+  "/api/admin/library/add",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
   const userId = req.headers["x-user-id"] as string;
   const { title, category, content, tags } = req.body;
 
@@ -3710,6 +4022,7 @@ const db = loadDb();
   };
 
   db.knowledge.push(newItem);
+  await firestore.collection("knowledge").doc(newItem.id).set(newItem);
   db.logs.push({
     id: "log_" + Date.now(),
     userId,
@@ -3718,9 +4031,11 @@ const db = loadDb();
     timestamp: new Date().toISOString()
   });
 
+  await persistLatestActivityLog(db);
   saveDb(db);
   res.json({ success: true, item: newItem });
-});
+  }
+);
 
 // In-memory rate limiting store for chat inquiries
 const userRequestTimestamps: Record<string, number[]> = {};
@@ -3735,7 +4050,7 @@ app.post(
   requireFirebaseAuth,
   async (req, res) => {
     const firebaseUser =
-      (req as any).firebaseUser as admin.auth.DecodedIdToken;
+      (req as any).firebaseUser as DecodedIdToken;
 
     const { text } = req.body;
 
@@ -3757,6 +4072,7 @@ app.post(
         : "";
 
     const db = loadDb();
+    db.knowledge = await loadKnowledgeItems();
 
     let userSnapshot = await firestore
       .collection("users")
@@ -3853,21 +4169,24 @@ if (isOnlySocialMessage) {
   const userMsgId = "msg_u_" + Date.now();
   const botMsgId = "msg_b_" + (Date.now() + 1);
 
-  db.messages.push({
+  const userMessage: PersistedMessage = {
     id: userMsgId,
     userId: user.id,
     sender: "user",
     text,
     timestamp: now
-  });
+  };
 
-  db.messages.push({
+  const exuMessage: PersistedMessage = {
     id: botMsgId,
     userId: user.id,
     sender: "exu",
     text: quickText,
     timestamp: now
-  });
+  };
+
+  db.messages.push(userMessage, exuMessage);
+  await persistMessages([userMessage, exuMessage]);
 
   saveDb(db);
 
@@ -4201,22 +4520,26 @@ if (compatibilityData) {
 
   const userMsgId = "msg_u_" + Date.now();
   const botMsgId = "msg_b_" + (Date.now() + 1);
+  const compatibilityTimestamp = new Date().toISOString();
 
-  db.messages.push({
+  const userMessage: PersistedMessage = {
     id: userMsgId,
     userId: user.id,
     sender: "user",
     text,
-    timestamp: new Date().toISOString()
-  });
+    timestamp: compatibilityTimestamp
+  };
 
-  db.messages.push({
+  const exuMessage: PersistedMessage = {
     id: botMsgId,
     userId: user.id,
     sender: "exu",
     text: finalResponseText,
-    timestamp: new Date().toISOString()
-  });
+    timestamp: compatibilityTimestamp
+  };
+
+  db.messages.push(userMessage, exuMessage);
+  await persistMessages([userMessage, exuMessage]);
 
   db.logs.push({
     id: "log_" + Date.now(),
@@ -4226,12 +4549,13 @@ if (compatibilityData) {
     timestamp: new Date().toISOString()
   });
 
+  await persistLatestActivityLog(db);
   saveDb(db);
 
   return res.json({
     success: true,
-    userMessage: { id: userMsgId, sender: "user", text, timestamp: new Date().toISOString() },
-    exuMessage: { id: botMsgId, sender: "exu", text: finalResponseText, timestamp: new Date().toISOString() },
+    userMessage: { id: userMsgId, sender: "user", text, timestamp: compatibilityTimestamp },
+    exuMessage: { id: botMsgId, sender: "exu", text: finalResponseText, timestamp: compatibilityTimestamp },
     creditsLeft: user.credits,
     xpAwarded: shouldChargeCredit ? 15 : 0,
     newLevel: user.level
@@ -4839,22 +5163,26 @@ try {
   // Save conversation log internally
   const userMsgId = "msg_u_" + Date.now();
   const botMsgId = "msg_b_" + (Date.now() + 1);
+  const messageTimestamp = new Date().toISOString();
 
-  db.messages.push({
+  const userMessage: PersistedMessage = {
     id: userMsgId,
     userId: user.id,
     sender: "user",
     text: text,
-    timestamp: new Date().toISOString()
-  });
+    timestamp: messageTimestamp
+  };
 
-  db.messages.push({
+  const exuMessage: PersistedMessage = {
     id: botMsgId,
     userId: user.id,
     sender: "exu",
     text: finalResponseText,
-    timestamp: new Date().toISOString()
-  });
+    timestamp: messageTimestamp
+  };
+
+  db.messages.push(userMessage, exuMessage);
+  await persistMessages([userMessage, exuMessage]);
 
   db.logs.push({
   id: "log_" + Date.now(),
@@ -4864,6 +5192,7 @@ try {
   timestamp: new Date().toISOString()
 });
 
+await persistLatestActivityLog(db);
 saveDb(db);
 
 return res.json({
@@ -4872,13 +5201,13 @@ return res.json({
     id: userMsgId,
     sender: "user",
     text,
-    timestamp: new Date().toISOString()
+    timestamp: messageTimestamp
   },
   exuMessage: {
     id: botMsgId,
     sender: "exu",
     text: finalResponseText,
-    timestamp: new Date().toISOString()
+    timestamp: messageTimestamp
   },
   creditsLeft: user.credits,
   xpAwarded,
@@ -4887,21 +5216,29 @@ return res.json({
 });
 
 // Vite server development middleware setup or production static bundle delivery
-async function startServer() {
+export async function startServer(options: { development?: boolean } = {}) {
   const distPath = path.join(process.cwd(), "dist");
 
-  app.use("/assets", express.static(path.join(distPath, "assets")));
-  app.use(express.static(distPath));
+  if (options.development) {
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa"
+    });
 
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(distPath, "index.html"));
-  });
+    app.use(vite.middlewares);
+  } else {
+    app.use("/assets", express.static(path.join(distPath, "assets")));
+    app.use(express.static(distPath));
+
+    app.get("*", (_req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[EXU RESPONDE SERVER] Running at http://localhost:${PORT}`);
   });
 }
-
-startServer();
 
 export default app;
