@@ -3682,11 +3682,6 @@ app.post(
   const { planId } = req.body;
 
   if (!userId) return res.status(401).json({ error: "Sessão inválida" });
-if (!String(userId).startsWith("usr_")) {
-  return res.status(400).json({
-    error: "Sessão inválida. Saia e entre novamente antes de comprar créditos."
-  });
-}
 
   const plans: Record<string, any> = {
   prata: {
