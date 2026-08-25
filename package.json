@@ -10,7 +10,7 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist db.json",
     "lint": "tsc --noEmit",
-    "test": "npm run build:test-api && node --test test/*.test.mjs"
+    "test": "npm run build:test-api && node --no-experimental-require-module --test test/*.test.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.18.0",
@@ -19,7 +19,7 @@
     "dotenv": "^17.2.3",
     "express": "^4.22.2",
     "firebase": "^12.18.0",
-    "firebase-admin": "^14.3.0",
+    "firebase-admin": "13.10.0",
     "lucide-react": "^0.546.0",
     "mercadopago": "^3.4.0",
     "motion": "^12.43.0",
