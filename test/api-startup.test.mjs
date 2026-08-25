@@ -13,6 +13,10 @@ for (const variableName of [
 const require = createRequire(import.meta.url);
 const { default: app } = require("../dist/api.test.cjs");
 
+test("a entrada serverless contém a aplicação sem depender de _server.ts", () => {
+  assert.equal(typeof app, "function");
+});
+
 async function requestFromTemporaryServer(path, options) {
   const server = app.listen(0, "127.0.0.1");
 
