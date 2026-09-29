@@ -399,12 +399,12 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
   id="main_portal_bg_video"
   src="/images/Exu Responde Fundo.png"
   alt=""
-  className="w-full h-full object-cover filter brightness-[0.5] contrast-[1.12]"
+  className="w-full h-full object-cover brightness-75"
 />
-        {/* Cinematic dark/red mask gradient */}
-        <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-black/85 z-1" />
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(115,10,10,0.25)_0%,transparent_100%)] z-1" />
-      </div>
+
+<div className="absolute inset-0 bg-gradient-to-t from-black/60 via-black/15 to-black/50 z-1" />
+<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(115,10,10,0.10)_0%,transparent_100%)] z-1" />
+</div>
 
       {/* Volumetric Smoke Particles Sim */}
       <div className="absolute inset-0 pointer-events-none z-1 mix-blend-screen opacity-20">
@@ -459,11 +459,10 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
                     
                     {/* Exu Responde Avatar Picture */}
                     <img 
-                      src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/ChatGPT-Image-29-de-mai.-de-2026-09_27_07.png" 
-                      alt="Exu Responde" 
-                      className="w-full h-full object-cover z-10"
-                      referrerPolicy="no-referrer"
-                    />
+  src="/images/Exu Responde Logo.png"
+  alt="Exu Responde"
+  className="w-full h-full object-cover z-10"
+/>
 
                     {/* Dark smoke glow overlay */}
                     <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-red-950/60 to-transparent z-20 pointer-events-none" />
