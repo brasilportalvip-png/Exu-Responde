@@ -122,10 +122,14 @@ export default function UserProfilePanel({ user, onUpdateUser }: UserProfileProp
 
           <div className="flex items-center gap-4 mb-4 select-none">
             <div className="w-16 h-16 rounded-full bg-gradient-to-tr from-yellow-600 via-yellow-400 to-amber-700 p-0.5 flex items-center justify-center shadow-[0_4px_15px_rgba(234,179,8,0.25)]">
-              <div className="w-full h-full rounded-full bg-zinc-950 flex flex-col items-center justify-center font-mono">
-                <span className="text-xl">🌟</span>
-              </div>
-            </div>
+  <div className="w-full h-full rounded-full overflow-hidden bg-zinc-950">
+    <img
+      src="/images/Exu Responde Logo.png"
+      alt="Exu Responde"
+      className="w-full h-full object-cover"
+    />
+  </div>
+</div>
             
             <div>
               <span className="text-[10px] font-mono tracking-widest text-red-500 font-bold uppercase">Patamar de Sabedoria</span>

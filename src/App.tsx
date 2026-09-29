@@ -554,9 +554,13 @@ setUser({
                 }}
                 className="flex items-center gap-2 px-3 py-1 rounded-full border border-zinc-800 bg-zinc-950/80 hover:border-yellow-500/30 transition-all cursor-pointer text-left"
               >
-                <div className="w-6.5 h-6.5 rounded-full bg-yellow-600/10 border border-yellow-500/30 flex items-center justify-center text-xs">
-                  👑
-                </div>
+                <div className="w-6.5 h-6.5 rounded-full overflow-hidden border border-yellow-500/30">
+  <img
+    src="/images/Exu Responde Logo.png"
+    alt="Exu Responde"
+    className="w-full h-full object-cover"
+  />
+</div>
                 <div className="hidden md:block leading-none pr-1">
                   <div className="text-[10px] font-bold text-yellow-400 uppercase truncate max-w-[85px]">
                     {user.name}
