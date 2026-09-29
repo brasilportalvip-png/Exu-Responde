@@ -323,12 +323,12 @@ function getGeminiClient(): GoogleGenAI {
 // ======================================================
 
 const GEMINI_MODELS = [
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
-  "gemini-3.5-flash-lite",
-] as const;
+  process.env.GEMINI_PRIMARY_MODEL?.trim(),
+  process.env.GEMINI_SECONDARY_MODEL?.trim(),
+  process.env.GEMINI_LITE_MODEL?.trim(),
+].filter((model): model is string => Boolean(model));
 
-type GeminiModelName = (typeof GEMINI_MODELS)[number];
+type GeminiModelName = string;
 
 type GeminiSafeResult = {
   text: string;
@@ -336,8 +336,8 @@ type GeminiSafeResult = {
 };
 
 const GEMINI_REQUEST_TIMEOUT_MS = 45_000;
-const GEMINI_MAX_RETRIES_PER_MODEL = 2;
-const GEMINI_RETRY_BASE_DELAY_MS = 1_000;
+const GEMINI_MAX_RETRIES_PER_MODEL = 1;
+const GEMINI_FALLBACK_DELAY_MS = 2_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -473,25 +473,17 @@ async function generateWithGeminiFallback(params: {
           error
         );
 
-        const canRetry =
-          retryable &&
-          attempt < GEMINI_MAX_RETRIES_PER_MODEL;
-
-        if (!canRetry) {
-          break;
-        }
-
-        const exponentialDelay =
-          GEMINI_RETRY_BASE_DELAY_MS *
-          Math.pow(2, attempt - 1);
-
-        const jitter = Math.floor(Math.random() * 500);
-
-        await sleep(exponentialDelay + jitter);
+        break;
       }
     }
 
     console.warn(`[GEMINI] Mudando do modelo ${model} para o próximo.`);
+
+const currentModelIndex = GEMINI_MODELS.indexOf(model);
+
+if (currentModelIndex < GEMINI_MODELS.length - 1) {
+  await sleep(GEMINI_FALLBACK_DELAY_MS);
+}
   }
 
   console.error("[GEMINI] Todos os modelos falharam:", errors);
