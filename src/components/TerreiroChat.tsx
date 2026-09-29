@@ -189,15 +189,11 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
           <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-yellow-600 via-amber-500 to-red-600" />
           
           <div className="relative w-full max-w-xs aspect-video mb-3.5 rounded-xl border-2 border-yellow-500/30 overflow-hidden shadow-[0_0_15px_rgba(234,179,8,0.2)] select-none bg-black">
-            <video
-              src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
-              className="w-full h-full object-cover"
-              autoPlay
-              loop
-              muted
-              playsInline
-              referrerPolicy="no-referrer"
-            />
+            <img
+  src="/images/Exu Responde Logo.png"
+  alt="Exu Responde"
+  className="w-full h-full object-cover"
+/>
             <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent pointer-events-none" />
           </div>
 

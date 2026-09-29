@@ -27,19 +27,9 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const videoRef = React.useRef<HTMLVideoElement>(null);
+  
 
-  // Sync mute/play status without reloading video element
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.muted = !soundEnabled;
-      if (soundEnabled) {
-        videoRef.current.play().catch((err) => {
-          console.warn("Autoplay unmute play retry:", err);
-        });
-      }
-    }
-  }, [soundEnabled]);
+  
 
   // Form states
   const [birthName, setBirthName] = useState("");
@@ -405,17 +395,12 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
       
       {/* Immersive Full Screen Background Video */}
       <div className="absolute inset-0 z-0 overflow-hidden select-none pointer-events-none bg-zinc-950 bg-[radial-gradient(circle_at_center,rgba(115,10,10,0.45)_0%,rgba(0,0,0,1)_100%)] animate-pulse duration-[10000ms]">
-        <video
-          ref={videoRef}
-          id="main_portal_bg_video"
-          src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
-          className="w-full h-full object-cover filter brightness-[0.5] contrast-[1.12]"
-          autoPlay
-          loop
-          muted={!soundEnabled}
-          playsInline
-          referrerPolicy="no-referrer"
-        />
+       <img
+  id="main_portal_bg_video"
+  src="/images/Exu Responde Fundo.png"
+  alt=""
+  className="w-full h-full object-cover filter brightness-[0.5] contrast-[1.12]"
+/>
         {/* Cinematic dark/red mask gradient */}
         <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-black/85 z-1" />
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(115,10,10,0.25)_0%,transparent_100%)] z-1" />

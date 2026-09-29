@@ -444,16 +444,12 @@ setUser({
   id="portal_espiritual"
   className="absolute inset-0 z-0 overflow-hidden pointer-events-none select-none"
 >
-  <video
-    id="vinhete_video"
-    src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
-    className="w-full h-full object-cover"
-    autoPlay
-    loop
-    muted
-    playsInline
-    referrerPolicy="no-referrer"
-  />
+  <img
+  id="vinhete_video"
+  src="/images/Exu Responde Fundo.png"
+  alt=""
+  className="w-full h-full object-cover"
+/>
 </div>
 
 {/* PARTICULAS ENERGETICAS */}
@@ -610,25 +606,9 @@ setUser({
           }`}>
             <div className="w-full h-full rounded-full overflow-hidden bg-zinc-950 border border-black relative">
  <img
-  src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/ChatGPT-Image-29-de-mai.-de-2026-09_27_07.png"
+  src="/images/Exu Responde Logo.png"
   alt="Exu Responde"
-  className="absolute inset-0 w-full h-full object-cover"
-  referrerPolicy="no-referrer"
-/>
-
-
-             
-<video
-  src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
-  className="relative z-10 w-full h-full object-cover filter brightness-[0.7] contrast-[1.15]"
-  autoPlay
-  loop
-  muted
-  playsInline
-  preload="auto"
-  controls={false}
-  disablePictureInPicture
-  referrerPolicy="no-referrer"
+  className="relative z-10 w-full h-full object-cover"
 />
 
 
@@ -892,14 +872,10 @@ setUser({
             className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex items-center justify-center p-4 overflow-y-auto"
           >
             <div className="absolute inset-0 select-none pointer-events-none opacity-40 bg-[radial-gradient(circle_at_center,rgba(115,10,10,0.4)_0%,transparent_100%)]">
-              <video
-  src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/Exu-Responde.mp4"
+              <img
+  src="/images/Exu Responde Fundo.png"
+  alt=""
   className="w-full h-full object-cover filter brightness-[0.7] contrast-[1.15]"
-  autoPlay
-  loop
-  muted
-  playsInline
-  referrerPolicy="no-referrer"
 />
             </div>
             
