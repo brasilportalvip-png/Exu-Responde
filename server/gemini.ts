@@ -2,14 +2,14 @@ import { GoogleGenAI } from "@google/genai";
 
 // ======================================================
 // CONFIGURAÇÃO OFICIAL DOS MODELOS GEMINI (ANTIQUEDA)
-// Ordem rigorosa: gemini-3.8-flash -> gemini-3.7-flash -> gemini-3.6-flash
-// Proibido: gemini-2.0-flash, gemini-1.5-*
+// Ordem rigorosa: gemini-3.8-flash -> gemini-flash-latest -> gemini-3.1-flash-lite
+// Modelos oficiais disponíveis no SDK @google/genai
 // ======================================================
 
 export const GEMINI_MODELS = [
   process.env.GEMINI_PRIMARY_MODEL?.trim() || "gemini-3.8-flash",
-  process.env.GEMINI_SECONDARY_MODEL?.trim() || "gemini-3.7-flash",
-  process.env.GEMINI_LITE_MODEL?.trim() || "gemini-3.6-flash",
+  process.env.GEMINI_SECONDARY_MODEL?.trim() || "gemini-flash-latest",
+  process.env.GEMINI_LITE_MODEL?.trim() || "gemini-3.1-flash-lite",
 ].filter((model, index, arr): model is string => Boolean(model) && arr.indexOf(model) === index);
 
 export interface GeminiTelemetryResult {

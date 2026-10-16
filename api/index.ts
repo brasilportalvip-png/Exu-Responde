@@ -283,9 +283,20 @@ function initializeFirebaseAdmin(): void {
     .trim();
 
   if (!privateKey.includes("BEGIN PRIVATE KEY")) {
-    throw new Error(
-      "FIREBASE_PRIVATE_KEY possui formato inválido. Informe a chave privada completa da conta de serviço."
+    if (checkIsProduction()) {
+      const err = new Error(
+        "FIREBASE_PRIVATE_KEY possui formato inválido. Informe a chave privada completa da conta de serviço."
+      );
+      firebaseInitializationError = err;
+      throw err;
+    }
+    console.warn(
+      "[AI Studio DEV] FIREBASE_PRIVATE_KEY é um placeholder de teste — usando in-memory Firestore & Auth mock."
     );
+    firestore = createMockFirestore();
+    firebaseAuth = createMockFirebaseAuth();
+    firebaseInitializationError = null;
+    return;
   }
 
   try {
@@ -303,9 +314,18 @@ function initializeFirebaseAdmin(): void {
     firebaseAuth = getAuth();
     firebaseInitializationError = null;
   } catch (error) {
-    firebaseInitializationError =
-      error instanceof Error ? error : new Error(String(error));
-    throw firebaseInitializationError;
+    if (checkIsProduction()) {
+      firebaseInitializationError =
+        error instanceof Error ? error : new Error(String(error));
+      throw firebaseInitializationError;
+    }
+    console.warn(
+      "[AI Studio DEV] Falha ao certificar chave privada com Firebase Admin (placeholder) — usando in-memory Firestore & Auth mock."
+    );
+    firestore = createMockFirestore();
+    firebaseAuth = createMockFirebaseAuth();
+    firebaseInitializationError = null;
+    return;
   }
 }
 
@@ -4134,16 +4154,20 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
 
   const dataId = String(paymentId || req.body?.data?.id || "");
 
-  if (webhookSecret) {
-    const isSigValid = verifyMercadoPagoSignature({
+  const isProduction = process.env.NODE_ENV === "production";
+  if (isProduction || webhookSecret) {
+    const signatureResult = verifyMercadoPagoSignature({
       xSignature,
       xRequestId,
       dataId,
       secret: webhookSecret,
     });
-    if (!isSigValid) {
-      console.warn("[MP WEBHOOK] Assinatura HMAC inválida do webhook Mercado Pago.");
-      return res.status(401).json({ error: "Assinatura do webhook inválida." });
+    if (!signatureResult.isValid) {
+      console.warn(`[MP WEBHOOK] Assinatura HMAC inválida do webhook Mercado Pago: ${signatureResult.reason}`);
+      return res.status(401).json({
+        error: "Assinatura do webhook inválida.",
+        reason: signatureResult.reason,
+      });
     }
   }
 
@@ -4179,64 +4203,141 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
       });
     }
 
-    const externalRef = paymentInfo.external_reference || paymentInfo.metadata?.orderId;
-    let orderData: any = null;
-    if (externalRef) {
-      const orderDoc = await firestore.collection("orders").doc(String(externalRef)).get();
-      if (orderDoc.exists) {
-        orderData = orderDoc.data();
-      }
-    }
-
-    const userId =
-      paymentInfo.metadata?.userId ||
-      paymentInfo.metadata?.user_id ||
-      orderData?.userId;
-
-    const credits = Number(paymentInfo.metadata?.credits || orderData?.credits || 0);
-
-    const planId =
-      paymentInfo.metadata?.planId ||
-      paymentInfo.metadata?.plan_id ||
-      orderData?.planId ||
-      "";
-
-    if (!userId || !credits) {
+    // Validação estrita da moeda (BRL)
+    if (paymentInfo.currency_id && paymentInfo.currency_id !== "BRL") {
+      console.warn(`[MP WEBHOOK] Moeda incompatível (${paymentInfo.currency_id}) para pagamento ${paymentId}. Esperado BRL.`);
       await firestore.collection("payments").doc(String(paymentId)).set({
         paymentId: String(paymentId),
-        status: "ignored_missing_metadata",
+        status: "rejected_invalid_currency",
+        currency: paymentInfo.currency_id,
         createdAt: new Date().toISOString()
-      });
+      }, { merge: true });
+      return res.status(200).json({ received: true, ignored: true, reason: "invalid_currency" });
+    }
 
-      return res.status(200).json({ received: true, ignored: true });
+    // Identificação OBRIGATÓRIA do pedido original armazenado no Firestore
+    const externalRef = paymentInfo.external_reference || paymentInfo.metadata?.orderId || paymentInfo.metadata?.order_id;
+    if (!externalRef) {
+      console.warn(`[MP WEBHOOK] Pagamento ${paymentId} aprovado sem external_reference de pedido.`);
+      await firestore.collection("payments").doc(String(paymentId)).set({
+        paymentId: String(paymentId),
+        status: "rejected_missing_order_reference",
+        amount: Number(paymentInfo.transaction_amount || 0),
+        createdAt: new Date().toISOString()
+      }, { merge: true });
+      return res.status(200).json({ received: true, ignored: true, reason: "missing_order_reference" });
+    }
+
+    const orderRef = firestore.collection("orders").doc(String(externalRef));
+    const orderDoc = await orderRef.get();
+    if (!orderDoc.exists) {
+      console.warn(`[MP WEBHOOK] Pedido original ${externalRef} não encontrado para o pagamento ${paymentId}.`);
+      await firestore.collection("payments").doc(String(paymentId)).set({
+        paymentId: String(paymentId),
+        orderId: String(externalRef),
+        status: "rejected_order_not_found",
+        amount: Number(paymentInfo.transaction_amount || 0),
+        createdAt: new Date().toISOString()
+      }, { merge: true });
+      return res.status(200).json({ received: true, ignored: true, reason: "order_not_found" });
+    }
+
+    const orderData = orderDoc.data() || {};
+    const targetUserId = String(orderData.userId || "");
+    if (!targetUserId) {
+      console.warn(`[MP WEBHOOK] Pedido original ${externalRef} sem userId válido.`);
+      return res.status(200).json({ received: true, ignored: true, reason: "invalid_order_user" });
+    }
+
+    // 1. Verificação de usuário divergente
+    const paymentUserId = paymentInfo.metadata?.userId || paymentInfo.metadata?.user_id;
+    if (paymentUserId && String(paymentUserId) !== targetUserId) {
+      console.warn(`[MP WEBHOOK] Divergência de usuário: pedido=${targetUserId}, pagamento=${paymentUserId}`);
+      await firestore.collection("payments").doc(String(paymentId)).set({
+        paymentId: String(paymentId),
+        orderId: String(externalRef),
+        status: "rejected_user_mismatch",
+        orderUserId: targetUserId,
+        paymentUserId: String(paymentUserId),
+        createdAt: new Date().toISOString()
+      }, { merge: true });
+      return res.status(200).json({ received: true, ignored: true, reason: "user_mismatch" });
+    }
+
+    // 2. Verificação de plano divergente
+    const paymentPlanId = paymentInfo.metadata?.planId || paymentInfo.metadata?.plan_id;
+    if (paymentPlanId && paymentPlanId !== orderData.planId) {
+      console.warn(`[MP WEBHOOK] Divergência de plano: pedido=${orderData.planId}, pagamento=${paymentPlanId}`);
+      await firestore.collection("payments").doc(String(paymentId)).set({
+        paymentId: String(paymentId),
+        orderId: String(externalRef),
+        status: "rejected_plan_mismatch",
+        orderPlanId: orderData.planId,
+        paymentPlanId,
+        createdAt: new Date().toISOString()
+      }, { merge: true });
+      return res.status(200).json({ received: true, ignored: true, reason: "plan_mismatch" });
+    }
+
+    // 3. Verificação de valor pago vs valor do pedido
+    const paidAmount = Number(paymentInfo.transaction_amount || 0);
+    const expectedAmount = Number(orderData.price || 0);
+    if (Math.abs(paidAmount - expectedAmount) > 0.01) {
+      console.warn(`[MP WEBHOOK] Divergência de valor: pago R$${paidAmount}, esperado R$${expectedAmount}`);
+      await firestore.collection("payments").doc(String(paymentId)).set({
+        paymentId: String(paymentId),
+        orderId: String(externalRef),
+        status: "rejected_amount_mismatch",
+        paidAmount,
+        expectedAmount,
+        createdAt: new Date().toISOString()
+      }, { merge: true });
+      return res.status(200).json({ received: true, ignored: true, reason: "amount_mismatch" });
+    }
+
+    // 4. Quantidade de créditos autoritativa do pedido original
+    const creditsToAdd = Number(orderData.credits || 0);
+    if (!creditsToAdd || creditsToAdd <= 0) {
+      console.warn(`[MP WEBHOOK] Pedido original sem créditos válidos: ${creditsToAdd}`);
+      return res.status(200).json({ received: true, ignored: true, reason: "invalid_order_credits" });
     }
 
     const paymentRef = firestore.collection("payments").doc(String(paymentId));
-    const userRef = firestore.collection("users").doc(String(userId));
+    const userRef = firestore.collection("users").doc(targetUserId);
     const ledgerOpId = `mp_pay_${paymentId}`;
 
     let creditedUserData: any = null;
     let balanceBeforeAfter = { before: 0, after: 0 };
+    let alreadyCredited = false;
 
     await firestore.runTransaction(async (transaction: any) => {
       const paymentDoc = await transaction.get(paymentRef);
-
       if (paymentDoc.exists && paymentDoc.data()?.status === "credited") {
+        alreadyCredited = true;
         return;
       }
 
-      const userDoc = await transaction.get(userRef);
+      const freshOrderDoc = await transaction.get(orderRef);
+      if (freshOrderDoc.exists) {
+        const freshOrder = freshOrderDoc.data() || {};
+        if (freshOrder.status === "completed" || freshOrder.status === "approved") {
+          alreadyCredited = true;
+          return;
+        }
+      }
 
+      const userDoc = await transaction.get(userRef);
       if (!userDoc.exists) {
         transaction.set(paymentRef, {
           paymentId: String(paymentId),
-          userId: String(userId),
-          credits,
-          planId,
-          amount: Number(paymentInfo.transaction_amount || 0),
+          orderId: String(externalRef),
+          userId: targetUserId,
+          credits: creditsToAdd,
+          planId: orderData.planId,
+          amount: paidAmount,
           status: "user_not_found",
           createdAt: new Date().toISOString()
-        });
+        }, { merge: true });
         return;
       }
 
@@ -4245,66 +4346,66 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
 
       const currentCredits = Number(userData.credits || 0);
       const currentXp = Number(userData.xp || 0);
-
-      const newXp =
-        currentXp + Math.round(Number(paymentInfo.transaction_amount || 0) * 5);
-
+      const newXp = currentXp + Math.round(paidAmount * 5);
       const { level } = checkXpLevel(newXp);
 
       balanceBeforeAfter = {
         before: currentCredits,
-        after: currentCredits + credits
+        after: currentCredits + creditsToAdd
       };
 
       transaction.update(userRef, {
-        credits: currentCredits + credits,
+        credits: currentCredits + creditsToAdd,
         xp: newXp,
         level,
         lastPaymentId: String(paymentId),
-        lastPlanId: planId,
-        lastCreditsAdded: credits,
-        lastPaymentAmount: Number(paymentInfo.transaction_amount || 0),
+        lastPlanId: orderData.planId,
+        lastCreditsAdded: creditsToAdd,
+        lastPaymentAmount: paidAmount,
         lastPaymentDate: new Date().toISOString()
       });
 
       transaction.set(paymentRef, {
         paymentId: String(paymentId),
-        userId: String(userId),
-        credits,
-        planId,
-        orderId: externalRef ? String(externalRef) : `ord_${paymentId}`,
-        amount: Number(paymentInfo.transaction_amount || 0),
+        userId: targetUserId,
+        credits: creditsToAdd,
+        planId: orderData.planId,
+        orderId: String(externalRef),
+        amount: paidAmount,
         status: "credited",
         createdAt: new Date().toISOString()
-      });
+      }, { merge: true });
 
-      if (externalRef) {
-        const orderRef = firestore.collection("orders").doc(String(externalRef));
-        transaction.set(orderRef, {
-          status: "approved",
-          paymentId: String(paymentId),
-          approvedAt: new Date().toISOString()
-        }, { merge: true });
-      }
+      transaction.set(orderRef, {
+        status: "completed",
+        paymentId: String(paymentId),
+        approvedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString()
+      }, { merge: true });
 
       const ledgerRef = firestore.collection("credit_ledger").doc(ledgerOpId);
       transaction.set(ledgerRef, {
         operationId: ledgerOpId,
-        userId: String(userId),
+        userId: targetUserId,
         firebaseUid: userData.firebaseUid || "",
-        type: "payment",
-        amount: credits,
+        type: "purchase",
+        amount: creditsToAdd,
         balanceBefore: currentCredits,
-        balanceAfter: currentCredits + credits,
+        balanceAfter: currentCredits + creditsToAdd,
         status: "committed",
         source: "mercadopago",
         paymentId: String(paymentId),
-        planId,
+        orderId: String(externalRef),
+        planId: orderData.planId,
         createdAt: new Date().toISOString(),
         committedAt: new Date().toISOString(),
         idempotencyKey: ledgerOpId
       });
     });
+
+    if (alreadyCredited) {
+      return res.status(200).json({ received: true, alreadyProcessed: true });
+    }
 
     if (creditedUserData) {
       try {
@@ -4313,9 +4414,9 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
           orderId: String(externalRef || `ord_${paymentId}`),
           customerEmail: creditedUserData.email || "",
           customerName: creditedUserData.name || creditedUserData.birthName || "Consulente",
-          planName: planId === "ouro" ? "Plano Ouro" : "Plano Prata",
-          amount: Number(paymentInfo.transaction_amount || 0),
-          credits,
+          planName: orderData.planId === "ouro" ? "Plano Ouro" : "Plano Prata",
+          amount: paidAmount,
+          credits: creditsToAdd,
           newBalance: balanceBeforeAfter.after,
           approvedAt: new Date().toISOString(),
         });
@@ -6002,5 +6103,5 @@ export async function startServer(options: { development?: boolean } = {}) {
   });
 }
 
-export { classifyQuestionIntent };
+export { classifyQuestionIntent, verifyMercadoPagoSignature };
 export default app;

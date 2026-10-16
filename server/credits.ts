@@ -5,7 +5,7 @@ export interface CreditLedgerRecord {
   idempotencyKey?: string;
   userId: string;
   firebaseUid?: string;
-  type: "debit" | "grant" | "refund" | "purchase" | "adjustment";
+  type: "debit" | "grant" | "refund" | "purchase" | "payment" | "adjustment";
   amount: number;
   balanceBefore: number;
   balanceAfter: number;
