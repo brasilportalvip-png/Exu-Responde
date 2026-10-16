@@ -16,12 +16,14 @@ import { getFirestore, type Firestore } from "firebase-admin/firestore";
 
 import {
   registerBodySchema,
+  userUpdateSchema,
   chatBodySchema,
   tarotBodySchema,
   buziosBodySchema,
   numerologiaBodySchema,
   astrologiaBodySchema,
   adminCreditAdjustSchema,
+  idempotencyKeySchema,
   parseBirthDateStrict,
   isValidIanaTimeZone,
 } from "../server/validation.ts";
@@ -2028,7 +2030,7 @@ function checkXpLevel(currentXp: number): { level: string; nextThreshold: number
 // Spiritual profile and symbolic affinity generator
 
 
-function calculateZodiacProfile(birthDate: string): any {
+export function calculateZodiacProfile(birthDate: string): any {
   if (!birthDate) {
     return {
       signoSolar: "Não calculado",
@@ -2086,7 +2088,7 @@ function calculateZodiacProfile(birthDate: string): any {
   };
 }
 
-function calculateSpiritualProfile(
+export function calculateSpiritualProfile(
   birthName: string,
   birthDate: string,
   birthTime?: string,
@@ -2270,6 +2272,42 @@ function calculateSpiritualProfile(
   };
 }
 
+export function formatSpiritualProfileForPrompt(user: any): string {
+  return `
+PERFIL ESPIRITUAL DO CONSULENTE:
+
+- Nome social: ${user.name || "Consulente"}
+- Nome de nascimento/registro: ${user.birthName || user.name || "Não informado"}
+- Data de nascimento: ${user.birthDate || "Não informada"}
+- Hora de nascimento: ${user.birthTime || "Não informada"}
+
+MAPA CALCULADO PELO SISTEMA:
+
+- Signo solar: ${user.signoSolar || user.signo || "Não calculado"}
+- Elemento astrológico: ${user.elementoSigno || user.elementoAstrologico || "Não calculado"}
+- Planeta regente: ${user.planetaRegente || "Não calculado"}
+- Odù de afinidade: ${user.oduPrincipal || "Não calculado"}
+- Tipo de Odù: ${user.oduTipo || "afinidade espiritual calculada, não jogo presencial de Ifá"}
+- Orixá de afinidade: ${user.orixaAfinidade || "Não calculado"}
+- Exu de afinidade: ${user.exuAfinidade || "Não calculado"}
+- Arquétipo dominante: ${user.arquetipoDominante || "Não calculado"}
+- Assinatura energética: ${user.assinaturaEnergetica || "Não calculada"}
+
+FUNDAMENTOS NUMEROLÓGICOS:
+
+- Número de destino: ${user.destinyNumber !== undefined ? user.destinyNumber : "Não calculado"}
+- Número da alma: ${user.soulNumber !== undefined ? user.soulNumber : "Não calculado"}
+- Número de expressão: ${user.expressionNumber !== undefined ? user.expressionNumber : "Não calculado"}
+- Ano pessoal: ${user.personalYear !== undefined ? user.personalYear : "Não calculado"}
+
+MAPA ELEMENTAL:
+
+- Fogo: ${user.mapaVibracional?.Fogo || 0}%
+- Terra: ${user.mapaVibracional?.Terra || 0}%
+- Ar: ${user.mapaVibracional?.Ar || 0}%
+- Água: ${user.mapaVibracional?.Agua || 0}%
+`;
+}
 
 function generateDeterministicInitialReading(user: any): string {
   const name = user.birthName || user.name || "Consulente";
@@ -2370,7 +2408,7 @@ app.post(
     const parseResult = registerBodySchema.safeParse(req.body);
     if (!parseResult.success) {
       return res.status(400).json({
-        error: parseResult.error.errors[0]?.message || "Dados de cadastro inválidos."
+        error: parseResult.error.issues[0]?.message || "Dados de cadastro inválidos."
       });
     }
 
@@ -2525,6 +2563,11 @@ app.post(
       avatarSeed:
         "eleg_seed_" + Math.floor(Math.random() * 9999),
       createdAt: new Date().toISOString(),
+      termsAccepted: true,
+      privacyAccepted: true,
+      termsVersion: termsVersion || "1.0",
+      privacyVersion: privacyVersion || "1.0",
+      legalConsentAt: new Date().toISOString(),
       ip: clientIp,
       deviceId: deviceId || "dev_not_tracked",
       browser: browser || "unknown",
@@ -2540,6 +2583,24 @@ app.post(
         ...newUser,
         createdAt: new Date().toISOString(),
         fraudReasons
+      });
+
+    // Auditoria legal persistida (LGPD)
+    await firestore
+      .collection("legal_consents")
+      .doc("consent_" + newUser.id)
+      .set({
+        userId: newUser.id,
+        firebaseUid: firebaseUser.uid,
+        email: normalizedEmail,
+        termsAccepted: true,
+        privacyAccepted: true,
+        termsVersion: termsVersion || "1.0",
+        privacyVersion: privacyVersion || "1.0",
+        age18Confirmed: true,
+        acceptedAt: new Date().toISOString(),
+        ipHash: crypto.createHash("sha256").update(clientIp + "consent_salt").digest("hex").substring(0, 16),
+        userAgent: browser || "unknown"
       });
 
     // Se créditos promocionais foram concedidos imediatamente (ex: e-mail já veio verificado), registrar no Ledger
@@ -2906,10 +2967,7 @@ app.get(
       await userDoc.ref.get();
 
     return res.json({
-      user: {
-        id: refreshedUserDoc.id,
-        ...refreshedUserDoc.data()
-      },
+      user: toPublicUserDTO(refreshedUserDoc.id, refreshedUserDoc.data() || {}),
       chats
     });
   }
@@ -2923,6 +2981,13 @@ app.post(
   "/api/user/update",
   requireFirebaseAuth,
   async (req, res) => {
+    const parseResult = userUpdateSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        error: parseResult.error.issues[0]?.message || "Dados de atualização inválidos."
+      });
+    }
+
     const firebaseUser =
       (req as any).firebaseUser as DecodedIdToken;
 
@@ -2932,7 +2997,7 @@ app.post(
       birthTime,
       birthPlace,
       name
-    } = req.body;
+    } = parseResult.data;
 
     if (!firebaseUser?.uid) {
       return res.status(401).json({
@@ -2986,64 +3051,36 @@ app.post(
       });
     }
 
+    const nameToUse = (name ? name.trim() : (currentUser.name || "")).substring(0, 100);
+    const birthNameToUse = birthName !== undefined ? birthName.trim() : (currentUser.birthName || nameToUse);
+    const birthDateToUse = birthDate !== undefined ? birthDate.trim() : (currentUser.birthDate || "");
+    const birthTimeToUse = birthTime !== undefined ? birthTime.trim() : (currentUser.birthTime || "");
+    const birthPlaceToUse = birthPlace !== undefined ? birthPlace.trim() : (currentUser.birthPlace || "");
 
-
-
-
-
-
-
-
-
-
-
-
-    const nameToUse =
-      birthName ||
-      currentUser.birthName ||
-      currentUser.name;
-
-    const dateToUse =
-      birthDate ||
-      currentUser.birthDate;
-
-    const placeToUse =
-      birthPlace ||
-      currentUser.birthPlace ||
-      "";
-
-    const timeToUse =
-      birthTime ||
-      currentUser.birthTime ||
-      "";
+    const natalChanged =
+      birthNameToUse !== (currentUser.birthName || "") ||
+      birthDateToUse !== (currentUser.birthDate || "") ||
+      birthTimeToUse !== (currentUser.birthTime || "") ||
+      birthPlaceToUse !== (currentUser.birthPlace || "");
 
     let spiritualProps = {};
-
-    if (nameToUse && dateToUse) {
+    if (natalChanged && birthNameToUse && birthDateToUse) {
       spiritualProps = calculateSpiritualProfile(
-        nameToUse,
-        dateToUse,
-        timeToUse,
-        placeToUse
+        birthNameToUse,
+        birthDateToUse,
+        birthTimeToUse,
+        birthPlaceToUse
       );
     }
 
     const updatedUser = {
       ...currentUser,
       firebaseUid: firebaseUser.uid,
-      name: name || currentUser.name,
-      birthName:
-        birthName || currentUser.birthName,
-      birthDate:
-        birthDate || currentUser.birthDate,
-      birthTime:
-        birthTime ||
-        currentUser.birthTime ||
-        "",
-      birthPlace:
-        birthPlace ||
-        currentUser.birthPlace ||
-        "",
+      name: nameToUse || currentUser.name,
+      birthName: birthNameToUse,
+      birthDate: birthDateToUse,
+      birthTime: birthTimeToUse,
+      birthPlace: birthPlaceToUse,
       ...spiritualProps,
       updatedAt: new Date().toISOString()
     };
@@ -3063,7 +3100,7 @@ app.post(
 
     return res.json({
       success: true,
-      user: updatedUser
+      user: toPublicUserDTO(userDoc.id, updatedUser)
     });
   }
 );
@@ -4015,10 +4052,22 @@ const selected = plans[normalizedPlanId];
   if (!selected) return res.status(400).json({ error: "Plano inválido." });
 
   try {
+    const orderId = "ord_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now();
+    await firestore.collection("orders").doc(orderId).set({
+      orderId,
+      userId: String(userId),
+      planId: normalizedPlanId,
+      credits: selected.credits,
+      price: selected.price,
+      status: "pending",
+      createdAt: new Date().toISOString()
+    });
+
     const preference = new Preference(mp);
 
     const result = await preference.create({
       body: {
+        external_reference: orderId,
         items: [
           {
             id: planId,
@@ -4029,30 +4078,31 @@ const selected = plans[normalizedPlanId];
           }
         ],
         metadata: {
-  userId: String(userId),
-  planId: normalizedPlanId,
-  credits: selected.credits
-},
+          userId: String(userId),
+          planId: normalizedPlanId,
+          credits: selected.credits,
+          orderId
+        },
         back_urls: {
           success: `${process.env.APP_URL}/?payment=success`,
           failure: `${process.env.APP_URL}/?payment=failure`,
           pending: `${process.env.APP_URL}/?payment=pending`
         },
         notification_url: `${process.env.APP_URL}/api/mercadopago/webhook`,
-payment_methods: {
-  excluded_payment_types: [
-    { id: "credit_card" },
-    { id: "debit_card" },
-    { id: "ticket" }
-  ],
-  installments: 1
-}
-
+        payment_methods: {
+          excluded_payment_types: [
+            { id: "credit_card" },
+            { id: "debit_card" },
+            { id: "ticket" }
+          ],
+          installments: 1
+        }
       }
     });
 
     res.json({
       success: true,
+      orderId,
       checkoutUrl: result.init_point,
       preferenceId: result.id
     });
@@ -4065,24 +4115,46 @@ payment_methods: {
   }
 );
 
-// Mercado Pago webhook - automatic credit confirmation
+// Mercado Pago webhook - automatic credit confirmation with signature verification
 app.post("/api/mercadopago/webhook", async (req, res) => {
   const clientIp = getClientIp(req);
   if (!await checkDurableRateLimit(`webhook_${clientIp}`, 60, 60 * 1000)) {
     return res.status(429).json({ error: "Taxa limite de requisições excedida." });
   }
 
-  try {
-    const paymentId =
-      req.body?.data?.id ||
-      req.body?.id ||
-      req.query?.id ||
-      req.query?.["data.id"];
+  const webhookSecret = process.env.MERCADO_PAGO_WEBHOOK_SECRET;
+  const xSignature = req.headers["x-signature"] as string | undefined;
+  const xRequestId = req.headers["x-request-id"] as string | undefined;
 
+  const paymentId =
+    req.body?.data?.id ||
+    req.body?.id ||
+    req.query?.id ||
+    req.query?.["data.id"];
+
+  const dataId = String(paymentId || req.body?.data?.id || "");
+
+  if (webhookSecret) {
+    const isSigValid = verifyMercadoPagoSignature({
+      xSignature,
+      xRequestId,
+      dataId,
+      secret: webhookSecret,
+    });
+    if (!isSigValid) {
+      console.warn("[MP WEBHOOK] Assinatura HMAC inválida do webhook Mercado Pago.");
+      return res.status(401).json({ error: "Assinatura do webhook inválida." });
+    }
+  }
+
+  try {
+    // Armazenamento estritamente minimizado do webhook (sem dados sensíveis)
     await firestore.collection("webhook_logs").add({
-      body: req.body || {},
-      query: req.query || {},
+      action: req.body?.action || req.query?.topic || "payment",
+      type: req.body?.type || "unknown",
       paymentId: paymentId ? String(paymentId) : "",
+      dataId: dataId || "",
+      clientIp,
       receivedAt: new Date().toISOString()
     });
 
@@ -4093,37 +4165,46 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
     const payment = new Payment(mp);
     const paymentInfo = await payment.get({ id: String(paymentId) });
 
-   if (paymentInfo.status !== "approved") {
-  await firestore.collection("payments").doc(String(paymentId)).set({
-    paymentId: String(paymentId),
-    status: String(paymentInfo.status || "unknown"),
-    rawStatus: paymentInfo.status || "",
-    metadata: paymentInfo.metadata || {},
-    updatedAt: new Date().toISOString()
-  }, { merge: true });
+    if (paymentInfo.status !== "approved") {
+      await firestore.collection("payments").doc(String(paymentId)).set({
+        paymentId: String(paymentId),
+        status: String(paymentInfo.status || "unknown"),
+        rawStatus: paymentInfo.status || "",
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
 
-  return res.status(200).json({
-    received: true,
-    status: paymentInfo.status
-  });
-}
+      return res.status(200).json({
+        received: true,
+        status: paymentInfo.status
+      });
+    }
+
+    const externalRef = paymentInfo.external_reference || paymentInfo.metadata?.orderId;
+    let orderData: any = null;
+    if (externalRef) {
+      const orderDoc = await firestore.collection("orders").doc(String(externalRef)).get();
+      if (orderDoc.exists) {
+        orderData = orderDoc.data();
+      }
+    }
 
     const userId =
       paymentInfo.metadata?.userId ||
-      paymentInfo.metadata?.user_id;
+      paymentInfo.metadata?.user_id ||
+      orderData?.userId;
 
-    const credits = Number(paymentInfo.metadata?.credits || 0);
+    const credits = Number(paymentInfo.metadata?.credits || orderData?.credits || 0);
 
     const planId =
       paymentInfo.metadata?.planId ||
       paymentInfo.metadata?.plan_id ||
+      orderData?.planId ||
       "";
 
     if (!userId || !credits) {
       await firestore.collection("payments").doc(String(paymentId)).set({
         paymentId: String(paymentId),
         status: "ignored_missing_metadata",
-        metadata: paymentInfo.metadata || {},
         createdAt: new Date().toISOString()
       });
 
@@ -4132,13 +4213,17 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
 
     const paymentRef = firestore.collection("payments").doc(String(paymentId));
     const userRef = firestore.collection("users").doc(String(userId));
+    const ledgerOpId = `mp_pay_${paymentId}`;
+
+    let creditedUserData: any = null;
+    let balanceBeforeAfter = { before: 0, after: 0 };
 
     await firestore.runTransaction(async (transaction: any) => {
       const paymentDoc = await transaction.get(paymentRef);
 
       if (paymentDoc.exists && paymentDoc.data()?.status === "credited") {
-  return;
-}
+        return;
+      }
 
       const userDoc = await transaction.get(userRef);
 
@@ -4152,11 +4237,11 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
           status: "user_not_found",
           createdAt: new Date().toISOString()
         });
-
         return;
       }
 
       const userData = userDoc.data() || {};
+      creditedUserData = userData;
 
       const currentCredits = Number(userData.credits || 0);
       const currentXp = Number(userData.xp || 0);
@@ -4165,6 +4250,11 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
         currentXp + Math.round(Number(paymentInfo.transaction_amount || 0) * 5);
 
       const { level } = checkXpLevel(newXp);
+
+      balanceBeforeAfter = {
+        before: currentCredits,
+        after: currentCredits + credits
+      };
 
       transaction.update(userRef, {
         credits: currentCredits + credits,
@@ -4182,14 +4272,24 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
         userId: String(userId),
         credits,
         planId,
+        orderId: externalRef ? String(externalRef) : `ord_${paymentId}`,
         amount: Number(paymentInfo.transaction_amount || 0),
         status: "credited",
         createdAt: new Date().toISOString()
       });
 
-      const ledgerRef = firestore.collection("credit_ledger").doc(`pay_${paymentId}`);
+      if (externalRef) {
+        const orderRef = firestore.collection("orders").doc(String(externalRef));
+        transaction.set(orderRef, {
+          status: "approved",
+          paymentId: String(paymentId),
+          approvedAt: new Date().toISOString()
+        }, { merge: true });
+      }
+
+      const ledgerRef = firestore.collection("credit_ledger").doc(ledgerOpId);
       transaction.set(ledgerRef, {
-        operationId: `pay_${paymentId}`,
+        operationId: ledgerOpId,
         userId: String(userId),
         firebaseUid: userData.firebaseUid || "",
         type: "payment",
@@ -4202,9 +4302,27 @@ app.post("/api/mercadopago/webhook", async (req, res) => {
         planId,
         createdAt: new Date().toISOString(),
         committedAt: new Date().toISOString(),
-        idempotencyKey: `pay_${paymentId}`
+        idempotencyKey: ledgerOpId
       });
     });
+
+    if (creditedUserData) {
+      try {
+        await queueAndSendPurchaseEmails(firestore, {
+          paymentId: String(paymentId),
+          orderId: String(externalRef || `ord_${paymentId}`),
+          customerEmail: creditedUserData.email || "",
+          customerName: creditedUserData.name || creditedUserData.birthName || "Consulente",
+          planName: planId === "ouro" ? "Plano Ouro" : "Plano Prata",
+          amount: Number(paymentInfo.transaction_amount || 0),
+          credits,
+          newBalance: balanceBeforeAfter.after,
+          approvedAt: new Date().toISOString(),
+        });
+      } catch (emailErr) {
+        console.error("[MP WEBHOOK] Erro ao enviar emails de compra:", emailErr);
+      }
+    }
 
     return res.status(200).json({ received: true, credited: true });
   } catch (err) {
@@ -4418,6 +4536,325 @@ app.post(
     } catch (err: any) {
       return res.status(400).json({ error: err.message || "Falha ao ajustar créditos." });
     }
+  }
+);
+
+// User API - Axé Statement / Credit Ledger History
+app.get(
+  "/api/credits/statement",
+  requireFirebaseAuth,
+  requirePortalUser,
+  async (req, res) => {
+    const portalUser = (req as any).portalUser;
+    const limit = Math.min(Number(req.query.limit) || 20, 50);
+
+    const snapshot = await firestore
+      .collection("credit_ledger")
+      .where("userId", "==", portalUser.id)
+      .orderBy("createdAt", "desc")
+      .limit(limit)
+      .get();
+
+    const statement = snapshot.docs.map((doc: any) => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
+    return res.json({
+      currentCredits: Number(portalUser.credits || 0),
+      statement
+    });
+  }
+);
+
+// User API - Manual Refund Request
+app.post(
+  "/api/user/refund-request",
+  requireFirebaseAuth,
+  requirePortalUser,
+  async (req, res) => {
+    const portalUser = (req as any).portalUser;
+    const { paymentId, reason } = req.body;
+
+    if (!paymentId || !reason || typeof reason !== "string" || reason.trim().length < 5) {
+      return res.status(400).json({ error: "Informe o ID do pagamento e o motivo detalhado da solicitação." });
+    }
+
+    const paymentDoc = await firestore.collection("payments").doc(String(paymentId)).get();
+    if (!paymentDoc.exists || paymentDoc.data()?.userId !== portalUser.id) {
+      return res.status(404).json({ error: "Pagamento não localizado para este usuário." });
+    }
+
+    const refundRequestId = "ref_req_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7);
+    const now = new Date().toISOString();
+
+    const requestData = {
+      id: refundRequestId,
+      userId: portalUser.id,
+      email: portalUser.email,
+      paymentId: String(paymentId),
+      amount: paymentDoc.data()?.amount || 0,
+      creditsPurchased: paymentDoc.data()?.credits || 0,
+      reason: reason.trim(),
+      status: "refund_requested",
+      createdAt: now,
+      updatedAt: now
+    };
+
+    await firestore.collection("refund_requests").doc(refundRequestId).set(requestData);
+
+    return res.json({
+      success: true,
+      message: "Solicitação de reembolso enviada para análise manual da administração.",
+      refundRequest: requestData
+    });
+  }
+);
+
+// Admin API - List Refund Requests
+app.get(
+  "/api/admin/refunds",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
+    const portalUser = (req as any).portalUser;
+    if (!await checkDurableRateLimit(`admin_${portalUser.id}`, 60, 60 * 1000)) {
+      return res.status(429).json({ error: "Muitas requisições administrativas. Aguarde um instante." });
+    }
+
+    const snapshot = await firestore.collection("refund_requests").orderBy("createdAt", "desc").limit(50).get();
+    const refunds = snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+
+    return res.json({ refunds });
+  }
+);
+
+// Admin API - Update Refund Request Status
+app.post(
+  "/api/admin/refunds/update-status",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
+    const portalUser = (req as any).portalUser;
+    if (!await checkDurableRateLimit(`admin_${portalUser.id}`, 60, 60 * 1000)) {
+      return res.status(429).json({ error: "Muitas requisições administrativas. Aguarde um instante." });
+    }
+
+    const { refundId, status, adminNotes, deductCredits } = req.body;
+    const allowedStatuses = ["refund_requested", "under_review", "approved_for_manual_refund", "manual_refund_completed", "rejected"];
+
+    if (!refundId || !allowedStatuses.includes(status)) {
+      return res.status(400).json({ error: "ID de reembolso e status válido são obrigatórios." });
+    }
+
+    const refundRef = firestore.collection("refund_requests").doc(String(refundId));
+    const refundDoc = await refundRef.get();
+    if (!refundDoc.exists) {
+      return res.status(404).json({ error: "Pedido de reembolso não encontrado." });
+    }
+
+    const refundData = refundDoc.data();
+    const now = new Date().toISOString();
+
+    if (status === "manual_refund_completed" && deductCredits && refundData.userId && refundData.creditsPurchased > 0) {
+      const userRef = firestore.collection("users").doc(refundData.userId);
+      const ledgerOpId = `op_ref_deduct_${refundId}`;
+
+      await firestore.runTransaction(async (transaction: any) => {
+        const userDoc = await transaction.get(userRef);
+        if (userDoc.exists) {
+          const uData = userDoc.data() || {};
+          const currentBal = Number(uData.credits || 0);
+          const toDeduct = Math.min(currentBal, Number(refundData.creditsPurchased));
+          const newBal = currentBal - toDeduct;
+
+          transaction.update(userRef, {
+            credits: newBal,
+            updatedAt: now
+          });
+
+          const ledgerRef = firestore.collection("credit_ledger").doc(ledgerOpId);
+          transaction.set(ledgerRef, {
+            operationId: ledgerOpId,
+            userId: refundData.userId,
+            firebaseUid: uData.firebaseUid || "",
+            adminId: portalUser.id,
+            type: "admin_adjustment",
+            amount: -toDeduct,
+            balanceBefore: currentBal,
+            balanceAfter: newBal,
+            status: "committed",
+            source: "manual_refund",
+            reason: `Dedução por reembolso manual concluído (Protocolo ${refundId})`,
+            createdAt: now,
+            committedAt: now
+          });
+        }
+      });
+    }
+
+    await refundRef.update({
+      status,
+      adminNotes: adminNotes || "",
+      processedBy: portalUser.id,
+      updatedAt: now
+    });
+
+    return res.json({ success: true, refundId, status });
+  }
+);
+
+// Admin API - Block / Unblock User
+app.post(
+  "/api/admin/users/block",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
+    const portalUser = (req as any).portalUser;
+    const { userId, blocked, reason } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: "ID de usuário obrigatório." });
+    }
+
+    const userRef = firestore.collection("users").doc(String(userId));
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+
+    await userRef.update({
+      isBlocked: Boolean(blocked),
+      blockReason: reason || "",
+      blockedAt: blocked ? new Date().toISOString() : null,
+      blockedBy: blocked ? portalUser.id : null,
+      updatedAt: new Date().toISOString()
+    });
+
+    return res.json({ success: true, userId, isBlocked: Boolean(blocked) });
+  }
+);
+
+// Admin API - Delete / Deactivate User
+app.post(
+  "/api/admin/users/delete",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ error: "ID de usuário obrigatório." });
+    }
+
+    const userRef = firestore.collection("users").doc(String(userId));
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+
+    await userRef.update({
+      deactivated: true,
+      deactivatedAt: new Date().toISOString()
+    });
+
+    return res.json({ success: true, userId, deactivated: true });
+  }
+);
+
+// Admin API - User Details with Ledger and Logs
+app.get(
+  "/api/admin/users/:userId/details",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
+    const { userId } = req.params;
+    const userDoc = await firestore.collection("users").doc(String(userId)).get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+
+    const userData = { id: userDoc.id, ...userDoc.data() };
+
+    const ledgerSnapshot = await firestore
+      .collection("credit_ledger")
+      .where("userId", "==", userId)
+      .orderBy("createdAt", "desc")
+      .limit(30)
+      .get();
+
+    const ledger = ledgerSnapshot.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+
+    const paymentsSnapshot = await firestore
+      .collection("payments")
+      .where("userId", "==", userId)
+      .orderBy("createdAt", "desc")
+      .limit(10)
+      .get();
+
+    const payments = paymentsSnapshot.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+
+    return res.json({
+      user: userData,
+      ledger,
+      payments
+    });
+  }
+);
+
+// Admin API - Library Delete & Edit
+app.post(
+  "/api/admin/library/delete",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "ID do item obrigatório." });
+
+    await firestore.collection("knowledge").doc(String(id)).delete();
+    return res.json({ success: true, id });
+  }
+);
+
+app.post(
+  "/api/admin/library/edit",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
+    const { id, title, category, content, tags } = req.body;
+    if (!id || !title || !content) {
+      return res.status(400).json({ error: "ID, título e conteúdo são obrigatórios." });
+    }
+
+    const updatedItem = {
+      title,
+      category: category || "geral",
+      content,
+      tags: Array.isArray(tags) ? tags : typeof tags === "string" ? tags.split(",").map((t: string) => t.trim()) : [],
+      updatedAt: new Date().toISOString()
+    };
+
+    await firestore.collection("knowledge").doc(String(id)).set(updatedItem, { merge: true });
+    return res.json({ success: true, id, item: updatedItem });
+  }
+);
+
+// Admin API - Webhook Logs
+app.get(
+  "/api/admin/webhook-logs",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
+    const snapshot = await firestore.collection("webhook_logs").orderBy("receivedAt", "desc").limit(50).get();
+    const logs = snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+    return res.json({ webhookLogs: logs });
   }
 );
 
@@ -5001,54 +5438,31 @@ if (matchedArticles.length > 0) {
   try {
     const ai = getGeminiClient();
 
- const liturgy = getBrazilDateTime();
+  const userTz = (req.headers["x-user-timezone"] as string) || req.body?.timezone;
+  const liturgy = getBrazilDateTime(userTz);
 
-const recalculatedProfile = calculateSpiritualProfile(
-  user.birthName || user.name,
-  user.birthDate,
-  user.birthTime,
-  user.birthPlace
-);
+  if (!user.signoSolar && user.birthDate) {
+    const recalculatedProfile = calculateSpiritualProfile(
+      user.birthName || user.name,
+      user.birthDate,
+      user.birthTime,
+      user.birthPlace
+    );
+    Object.assign(user, recalculatedProfile);
+  }
 
-Object.assign(user, recalculatedProfile);
-
-const userSpiritualDetails = `
-PERFIL ESPIRITUAL DO CONSULENTE:
-
-- Nome social: ${user.name || "Consulente"}
-- Nome de nascimento/registro: ${user.birthName || user.name || "Não informado"}
-- Data de nascimento: ${user.birthDate || "Não informada"}
-- Hora de nascimento: ${user.birthTime || "Não informada"}
-
-MAPA CALCULADO PELO SISTEMA:
-
-- Signo solar: ${user.signo || "Não calculado"}
-- Elemento astrológico: ${user.elementoAstrologico || "Não calculado"}
-- Planeta regente: ${user.planetaRegente || "Não calculado"}
-- Odù de afinidade: ${user.oduPrincipal || "Não calculado"}
-- Tipo de Odù: ${user.oduTipo || "afinidade espiritual calculada, não jogo presencial de Ifá"}
-- Orixá de afinidade: ${user.orixaAfinidade || "Não calculado"}
-- Exu de afinidade: ${user.exuAfinidade || "Não calculado"}
-- Arquétipo dominante: ${user.arquetipoDominante || "Não calculado"}
-- Assinatura energética: ${user.assinaturaEnergetica || "Não calculada"}
-
-FUNDAMENTOS NUMEROLÓGICOS:
-
-- Número de destino: ${user.destinyNumber || "Não calculado"}
-- Número da alma: ${user.soulNumber || "Não calculado"}
-- Número de expressão: ${user.expressionNumber || "Não calculado"}
-- Ano pessoal: ${user.personalYear || "Não calculado"}
-
-MAPA ELEMENTAL:
-
-- Fogo: ${user.mapaVibracional?.Fogo || 0}%
-- Terra: ${user.mapaVibracional?.Terra || 0}%
-- Ar: ${user.mapaVibracional?.Ar || 0}%
-- Água: ${user.mapaVibracional?.Agua || 0}%
-`;
+  const userSpiritualDetails = formatSpiritualProfileForPrompt(user);
 
 const liturgiaDoDia = `
-- Momento da consulta: ${liturgy.dateStr}
+CONTEXTO TEMPORAL E DATA/HORA REAL DO CONSULENTE:
+- Momento exato da consulta: ${liturgy.dateStr}
+- Timezone do consulente: ${liturgy.timeZone}
+- Data de hoje: ${liturgy.formattedDate} (${liturgy.weekdayName})
+- Hora local atual: ${liturgy.formattedTime}
+- Período do dia: ${liturgy.periodOfDay} (Saudação: ${liturgy.greeting})
+- Ontem foi: ${liturgy.yesterdayDateStr}
+- Amanhã será: ${liturgy.tomorrowDateStr}
+- Ano corrente: ${liturgy.year}
 - Regência espiritual do dia: ${liturgy.orixa}
 - Saudação do dia: ${liturgy.saudacoes}
 - Cores de firmeza do dia: ${liturgy.cores}
@@ -5057,6 +5471,9 @@ const liturgiaDoDia = `
 - Banho tradicional sugerido:
   Título: ${liturgy.banhoTitulo}
   Orientação: ${liturgy.banhoDescritivo}
+
+DIRETRIZ DE ÂNCORA TEMPORAL:
+Quando o consulente falar de "hoje", "ontem", "amanhã" ou horários relativos (ex: "amanhã tenho entrevista", "reunião às 15h"), ancore sua sabedoria na data exata de amanhã (${liturgy.tomorrowDateStr}) ou de hoje (${liturgy.formattedDate}), reconhecendo com precisão o momento no fuso ${liturgy.timeZone}.
 `;
 
 
@@ -5475,44 +5892,15 @@ A profundidade da resposta deve corresponder ao tipo de consulta selecionado.
 
 
 
-try {
-  const geminiResult = await generateWithGeminiFallback({
-    contents: userMessagePayload,
-    systemInstruction: systemPromptInstruction,
-  });
+    const geminiResult = await generateWithGeminiFallback({
+      contents: userMessagePayload,
+      systemInstruction: systemPromptInstruction,
+    });
 
-  finalResponseText = fixPortugueseEncoding(geminiResult.text);
-
-  console.log(
-    `[CHAT] Modelo utilizado: ${geminiResult.model}`
-  );
-} catch (error) {
-  console.error(
-    "[CHAT] Todos os modelos Gemini falharam:",
-    error
-  );
-
-  finalResponseText = fixPortugueseEncoding(
-    TEMPLE_FALLBACKS[
-      Math.floor(Math.random() * TEMPLE_FALLBACKS.length)
-    ]
-  );
-}
-
-
-
-
-
-
-
-
-
-
-
-
+    finalResponseText = fixPortugueseEncoding(geminiResult.text);
   } catch (err: any) {
     console.error("Gemini Failure in chat:", err);
-    if (debitResult) {
+    if (debitResult && creditsCost > 0) {
       try {
         await executeCreditRefundTransactional({
           userRef: portalUser.ref,
@@ -5521,14 +5909,29 @@ try {
           source: "chat",
           reason: "Falha de comunicação no terreiro virtual",
         });
-        user.credits = debitResult.balanceBefore;
+        return res.status(503).json({
+          error: "Os caminhos do terreiro oscilaram momentaneamente. Seus créditos de Axé foram integralmente preservados e estornados.",
+          creditsLeft: debitResult.balanceBefore,
+        });
       } catch (refErr) {
         console.error("[CHAT] Erro ao estornar crédito do chat:", refErr);
+        await firestore.collection("reconciliations").add({
+          type: "chat_refund_failed",
+          userId: user.id,
+          operationId: debitResult.operationId,
+          creditsCost,
+          error: String(refErr),
+          status: "reconciliation_required",
+          createdAt: new Date().toISOString(),
+        });
+        return res.status(503).json({
+          error: "Ocorreu uma oscilação na resposta. Sua solicitação foi encaminhada para reconciliação prioritária de créditos.",
+          creditsLeft: debitResult.balanceAfter,
+        });
       }
     }
-    finalResponseText =
-      TEMPLE_FALLBACKS[Math.floor(Math.random() * TEMPLE_FALLBACKS.length)] +
-      " (Os ventos sagrados pedem paciência neste instante. Seus créditos foram devidamente preservados.)";
+    // Para saudações gratuitas com zero custo:
+    finalResponseText = "Laroyê, buscador! Os ventos sagrados sopram na encruzilhada. Como posso clarear seus caminhos hoje?";
   }
 
   // Save conversation log in Firestore

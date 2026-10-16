@@ -75,3 +75,23 @@ export async function getApiHeaders(options?: {
 
   return headers;
 }
+
+export async function apiFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit & { idempotencyKey?: string; token?: string }
+): Promise<Response> {
+  const defaultHeaders = await getApiHeaders({
+    idempotencyKey: init?.idempotencyKey,
+    token: init?.token,
+  });
+
+  const headers = {
+    ...defaultHeaders,
+    ...((init?.headers as Record<string, string>) || {}),
+  };
+
+  return fetch(input, {
+    ...init,
+    headers,
+  });
+}

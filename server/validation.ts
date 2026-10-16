@@ -86,14 +86,30 @@ export const registerBodySchema = z.object({
     return parsed.isAdult;
   }, { message: "O portal é restrito para maiores de 18 anos conforme os Termos de Uso." }),
   birthTime: z.string().trim().regex(/^(\d{2}:\d{2})?$/, "Horário deve ser no formato HH:mm").optional().default(""),
-  birthPlace: z.string().trim().max(100, "Local muito longo").optional().default("Não informada"),
+  birthPlace: z.string().trim().max(100, "Local muito longo").optional().default(""),
   email: z.string().trim().email("E-mail inválido").max(150),
   deviceId: z.string().trim().max(100).optional().default("dev_not_tracked"),
   browser: z.string().trim().max(150).optional().default("unknown"),
   session: z.string().trim().max(150).optional().default("unknown"),
   honeypot: z.string().max(50).optional(),
-  termsAccepted: z.boolean().optional(),
-  privacyAccepted: z.boolean().optional()
+  termsAccepted: z.literal(true, {
+    message: "Você deve aceitar os Termos de Uso para prosseguir."
+  }),
+  privacyAccepted: z.literal(true, {
+    message: "Você deve aceitar a Política de Privacidade para prosseguir."
+  }),
+  termsVersion: z.string().trim().min(1, "Versão dos termos obrigatória").optional().default("1.0"),
+  privacyVersion: z.string().trim().min(1, "Versão da política obrigatória").optional().default("1.0"),
+});
+
+export const userUpdateSchema = z.object({
+  name: z.string().trim().min(2, "Nome deve ter ao menos 2 caracteres").max(100).optional(),
+  birthName: z.string().trim().min(2, "Nome natal deve ter ao menos 2 caracteres").max(100).optional(),
+  birthDate: z.string().trim().refine((val) => !val || parseBirthDateStrict(val).isValid, {
+    message: "Data de nascimento inválida (use o formato AAAA-MM-DD)."
+  }).optional(),
+  birthTime: z.string().trim().regex(/^(\d{2}:\d{2})?$/, "Horário deve ser no formato HH:mm").optional().default(""),
+  birthPlace: z.string().trim().max(100, "Local muito longo").optional().default(""),
 });
 
 export const chatBodySchema = z.object({

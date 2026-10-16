@@ -9,6 +9,7 @@ import { Send, Sparkles, MessageSquare, Compass, Shield, Flame, BookOpen, Volume
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, ChatMessage } from "../types";
 import { auth } from "../firebase";
+import { apiFetch } from "../api";
 
 interface TerreiroChatProps {
   user: UserProfile;
@@ -80,16 +81,10 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
     try {
       const firebaseUser = auth.currentUser;
       const token = firebaseUser ? await firebaseUser.getIdToken() : "";
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json"
-      };
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
 
-      const res = await fetch("/api/exu/chat", {
+      const res = await apiFetch("/api/exu/chat", {
         method: "POST",
-        headers,
+        token,
         body: JSON.stringify({ text: textToSend, type: consultationType })
       });
 

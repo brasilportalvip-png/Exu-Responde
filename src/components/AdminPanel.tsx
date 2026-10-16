@@ -9,6 +9,7 @@ import { Users, BarChart3, BookOpen, Settings, Plus, Key, Terminal, RefreshCw, L
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, KnowledgeItem } from "../types";
 import { auth } from "../firebase";
+import { apiFetch } from "../api";
 
 interface AdminPanelProps {
   user: UserProfile;
@@ -41,49 +42,30 @@ export default function AdminPanel({ user }: AdminPanelProps) {
 
     try {
       const firebaseUser = auth.currentUser;
-
       if (!firebaseUser) {
         throw new Error(
           "Sua sessão expirou. Entre novamente para acessar o painel administrativo."
         );
       }
 
-      const token = await firebaseUser.getIdToken();
-
-      const hds = {
-        "Authorization": `Bearer ${token}`
-      };
-
-      const statsRes = await fetch("/api/admin/analytics", {
-        headers: hds
-      });
-
+      const statsRes = await apiFetch("/api/admin/analytics");
       const statsObj = await statsRes.json();
-
       if (!statsRes.ok) {
         throw new Error(
           statsObj.error || "Falha ao carregar analytics."
         );
       }
 
-      const usersRes = await fetch("/api/admin/users", {
-        headers: hds
-      });
-
+      const usersRes = await apiFetch("/api/admin/users");
       const usersObj = await usersRes.json();
-
       if (!usersRes.ok) {
         throw new Error(
           usersObj.error || "Falha ao carregar usuários."
         );
       }
 
-      const libRes = await fetch("/api/admin/library", {
-        headers: hds
-      });
-
+      const libRes = await apiFetch("/api/admin/library");
       const libObj = await libRes.json();
-
       if (!libRes.ok) {
         throw new Error(
           libObj.error || "Falha ao carregar biblioteca."
@@ -120,20 +102,16 @@ export default function AdminPanel({ user }: AdminPanelProps) {
 
     try {
       const firebaseUser = auth.currentUser;
-
       if (!firebaseUser) {
         throw new Error(
           "Sua sessão expirou. Entre novamente para alterar a biblioteca."
         );
       }
 
-      const token = await firebaseUser.getIdToken();
-
-      const res = await fetch("/api/admin/library/add", {
+      const res = await apiFetch("/api/admin/library/add", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
           title: kbTitle,

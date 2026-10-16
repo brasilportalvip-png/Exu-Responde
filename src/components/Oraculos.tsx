@@ -9,6 +9,7 @@ import { Sparkles, Compass, Flame, Calendar, Award, BookOpen, Clock, Heart, Doll
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, TarotCard } from "../types";
 import { auth } from "../firebase";
+import { apiFetch } from "../api";
 
 interface OraculosProps {
   user: UserProfile;
@@ -56,6 +57,7 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
   const [numName, setNumName] = useState(user.birthName || user.name || "");
   const [numBirthDate, setNumBirthDate] = useState(user.birthDate || "");
   const [numLoading, setNumLoading] = useState(false);
+  const [numError, setNumError] = useState("");
   const [numResult, setNumResult] = useState<any | null>(null);
 
   // --- ASTROLOGY STATE ---
@@ -84,12 +86,9 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
       }
 
       const token = await firebaseUser.getIdToken();
-      const res = await fetch("/api/oraculo/buzios", {
+      const res = await apiFetch("/api/oraculo/buzios", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           question: buziosQuestion
         })
@@ -151,12 +150,9 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
 
       const token = await firebaseUser.getIdToken();
 
-      const res = await fetch("/api/oraculo/tarot", {
+      const res = await apiFetch("/api/oraculo/tarot", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           question: tarotQuestion,
           slotsCount: tarotOption
@@ -223,12 +219,9 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
 
       const token = await firebaseUser.getIdToken();
 
-      const res = await fetch("/api/oraculo/numerologia", {
+      const res = await apiFetch("/api/oraculo/numerologia", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           birthName: numName,
           birthDate: numBirthDate
@@ -238,22 +231,21 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || "Erro cosmético de simetria nos cálculos.");
+        throw new Error(data.error || "Erro ao calcular mapa numerológico.");
       }
 
       setNumResult(data.details);
+      setNumError("");
       AudioEngine.playCrystalBell();
 
       onUpdateUser({
         ...user,
         credits: data.creditsLeft,
         xp: user.xp + 25,
-        level: data.newLevel,
-        birthDate: numBirthDate,
-        birthName: numName
+        level: data.newLevel
       });
     } catch (err: any) {
-      alert(err.message || "Erro de oráculo.");
+      setNumError(err.message || "Erro no oráculo de numerologia.");
     } finally {
       setNumLoading(false);
     }
@@ -284,12 +276,9 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
 
       const token = await firebaseUser.getIdToken();
 
-      const res = await fetch("/api/oraculo/astrologia", {
+      const res = await apiFetch("/api/oraculo/astrologia", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           birthDate: targetDate
         })
@@ -304,10 +293,13 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
       setAstrologyResult(data.details);
       AudioEngine.playCrystalBell();
 
-      onUpdateUser({
-        ...user,
-        birthDate: targetDate
-      });
+      if (typeof data.creditsLeft === "number") {
+        onUpdateUser({
+          ...user,
+          credits: data.creditsLeft,
+          xp: user.xp + (data.xpAwarded || 20)
+        });
+      }
     } catch (err: any) {
       setAstrologyError(err.message || "Erro ao abrir o mapa astral ancestral.");
     } finally {
@@ -781,6 +773,12 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
                   )}
                 </button>
               </div>
+
+              {numError && (
+                <div className="p-3 bg-red-950/40 border border-red-900/50 rounded-xl text-red-400 text-xs font-mono text-center">
+                  ⚠️ {numError}
+                </div>
+              )}
 
               {/* Numerology detailed report result */}
               {numResult && (

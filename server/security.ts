@@ -1,5 +1,6 @@
 import type express from "express";
 import crypto from "node:crypto";
+import { getApps } from "firebase-admin/app";
 
 // ======================================================
 // OBTENÇÃO SEGURA DE IP REAL (SEM CONFIAR CEGAMENTE EM SPOOFING)

@@ -9,6 +9,7 @@ import { Award, Compass, Gift, Clock, ShieldCheck, Flame, Compass as ArIcon, Hea
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile } from "../types";
 import { auth } from "../firebase";
+import { apiFetch } from "../api";
 
 interface UserProfileProps {
   user: UserProfile;
@@ -41,6 +42,7 @@ export default function UserProfilePanel({ user, onUpdateUser }: UserProfileProp
   const [birthPlace, setBirthPlace] = useState(user.birthPlace || "");
   const [updating, setUpdating] = useState(false);
   const [successMsg, setSuccessMsg] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
 
   const maxThreshold = LEVEL_THRESHOLDS[user.level] || 1000;
   // Calculate relative progress inside current level category
@@ -74,12 +76,9 @@ export default function UserProfilePanel({ user, onUpdateUser }: UserProfileProp
 
       const token = await firebaseUser.getIdToken();
 
-      const res = await fetch("/api/user/update", {
+      const res = await apiFetch("/api/user/update", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           name: editName,
           birthName,
@@ -90,12 +89,13 @@ export default function UserProfilePanel({ user, onUpdateUser }: UserProfileProp
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Ocorreu uma falha.");
+      if (!res.ok) throw new Error(data.error || "Ocorreu uma falha ao atualizar perfil.");
       onUpdateUser(data.user);
       setSuccessMsg("Seu perfil astral e de identidade foi re-gravado nas águas sagradas!");
       setTimeout(() => setSuccessMsg(""), 4000);
     } catch (err: any) {
-      alert(err.message || "Falha.");
+      setErrorMsg(err.message || "Falha na atualização do perfil.");
+      setTimeout(() => setErrorMsg(""), 5000);
     } finally {
       setUpdating(false);
     }
@@ -279,6 +279,24 @@ export default function UserProfilePanel({ user, onUpdateUser }: UserProfileProp
                 className="w-full px-3 py-2 rounded-lg border border-red-950 bg-black text-amber-100 focus:outline-none focus:border-yellow-500/60 transition-all font-mono animate-none"
               />
             </div>
+
+            <div className="space-y-1.5">
+              <label htmlFor="birth_place_pref" className="block text-zinc-400 uppercase font-bold">Local de Nascimento</label>
+              <input
+                id="birth_place_pref"
+                type="text"
+                placeholder="Ex: Salvador, BA - Brasil"
+                value={birthPlace}
+                onChange={(e) => setBirthPlace(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg border border-red-950 bg-black text-amber-100 placeholder-zinc-700 focus:outline-none focus:border-yellow-500/60 transition-all font-mono"
+              />
+            </div>
+
+            {errorMsg && (
+              <div className="text-[11px] font-semibold text-red-400 bg-red-950/40 py-2 px-3 border border-red-900/40 rounded-lg text-center font-sans">
+                ⚠️ {errorMsg}
+              </div>
+            )}
 
             {successMsg && (
               <div className="text-[11px] font-semibold text-emerald-400 bg-emerald-950/20 py-2 border border-emerald-900/30 rounded-lg text-center font-sans">

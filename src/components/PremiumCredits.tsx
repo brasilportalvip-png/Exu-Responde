@@ -3,6 +3,7 @@ import { Coins, Gift } from "lucide-react";
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, CreditPlan } from "../types";
 import { auth } from "../firebase";
+import { apiFetch } from "../api";
 
 interface PremiumCreditsProps {
   user: UserProfile;
@@ -32,9 +33,11 @@ const CREDIT_PLANS: CreditPlan[] = [
 
 export default function PremiumCredits({ user }: PremiumCreditsProps) {
   const [loadingPlanId, setLoadingPlanId] = useState<string | null>(null);
+  const [checkoutError, setCheckoutError] = useState<string>("");
 
   const checkoutPlan = async (plan: CreditPlan) => {
     setLoadingPlanId(plan.id);
+    setCheckoutError("");
     AudioEngine.playCrystalBell();
 
     try {
@@ -48,12 +51,9 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
 
       const token = await firebaseUser.getIdToken();
 
-      const res = await fetch("/api/credits/buy", {
+      const res = await apiFetch("/api/credits/buy", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           planId: plan.id,
           paymentMethod: "pix"
@@ -77,7 +77,7 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
         "Checkout Mercado Pago não retornou URL."
       );
     } catch (e: any) {
-      alert(
+      setCheckoutError(
         "Erro ao criar pagamento: " +
           (e?.message || "Falha desconhecida.")
       );
@@ -106,6 +106,12 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
           e evolua seus níveis.
         </p>
       </div>
+
+      {checkoutError && (
+        <div className="max-w-xl mx-auto p-3 bg-red-950/40 border border-red-900/50 rounded-xl text-red-400 text-xs font-mono text-center">
+          ⚠️ {checkoutError}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-3xl mx-auto">
         {CREDIT_PLANS.map((plan, pIdx) => (

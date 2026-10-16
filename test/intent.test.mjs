@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const { classifyQuestionIntent } = require("../dist/api.test.cjs");
 
 test("Intent Classifier: Negócios e Sociedade nunca caem em amor", () => {
-  const t1 = classifyQuestionIntent("Estou abrindo uma sociedade com Flavio Roberto Ortiz Costa 02/02/1983. Teremos sucesso?");
+  const t1 = classifyQuestionIntent("Estou abrindo uma sociedade com Flavio Roberto Ortiz Costa 02/02/1983, teremos sucesso?");
   assert.equal(t1.theme, "negocios_sociedade");
   assert.equal(t1.isLove, false);
   assert.equal(t1.isBusiness, true);
@@ -21,26 +21,36 @@ test("Intent Classifier: Negócios e Sociedade nunca caem em amor", () => {
 });
 
 test("Intent Classifier: Trabalho e Emprego nunca caem em amor", () => {
-  const t1 = classifyQuestionIntent("João Rogério Braga 13/08/1967 vai conseguir emprego?");
+  const t1 = classifyQuestionIntent("João Rogério Braga 13/08/1967 vai arrumar emprego?");
   assert.equal(t1.theme, "trabalho_carreira");
   assert.equal(t1.isLove, false);
   assert.equal(t1.isJob, true);
 
-  const t2 = classifyQuestionIntent("Eu e João teremos sucesso trabalhando juntos?");
+  const t2 = classifyQuestionIntent("Eu e João trabalharemos bem juntos?");
   assert.equal(t2.theme, "trabalho_carreira");
   assert.equal(t2.isLove, false);
+  assert.equal(t2.isJob, true);
+
+  const t3 = classifyQuestionIntent("Eu e João teremos sucesso trabalhando juntos?");
+  assert.equal(t3.theme, "trabalho_carreira");
+  assert.equal(t3.isLove, false);
 });
 
 test("Intent Classifier: Família e Amizade nunca caem em amor", () => {
-  const t1 = classifyQuestionIntent("Minha amiga Maria está bem?");
+  const t1 = classifyQuestionIntent("Como está minha amiga Maria?");
   assert.notEqual(t1.theme, "amor_relacionamento");
   assert.equal(t1.isLove, false);
   assert.equal(t1.isFriendship, true);
 
-  const t2 = classifyQuestionIntent("Minha irmã e eu vamos nos entender?");
-  assert.equal(t2.theme, "familia");
+  const t2 = classifyQuestionIntent("Minha amiga Maria está bem?");
+  assert.notEqual(t2.theme, "amor_relacionamento");
   assert.equal(t2.isLove, false);
-  assert.equal(t2.isFamily, true);
+  assert.equal(t2.isFriendship, true);
+
+  const t3 = classifyQuestionIntent("Minha irmã e eu vamos nos entender?");
+  assert.equal(t3.theme, "familia");
+  assert.equal(t3.isLove, false);
+  assert.equal(t3.isFamily, true);
 });
 
 test("Intent Classifier: Amor somente quando contexto é explicitamente amoroso", () => {

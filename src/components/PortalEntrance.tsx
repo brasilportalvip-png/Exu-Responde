@@ -15,7 +15,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { Sparkles, CheckCircle, Compass, LogIn, Volume2, VolumeX, Flame, User, Mail, Calendar, Clock, MapPin, Lock, Eye, EyeOff, ShieldCheck, FileText } from "lucide-react";
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile } from "../types";
-import { parseApiResponse } from "../api";
+import { parseApiResponse, apiFetch } from "../api";
 import LegalModal, { LegalTab } from "./LegalModal";
 
 interface PortalEntranceProps {
@@ -37,9 +37,6 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
     setLegalModalTab(tab);
     setLegalModalOpen(true);
   };
-  
-
-  
 
   // Form states
   const [birthName, setBirthName] = useState("");
@@ -48,6 +45,11 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
   const [birthPlace, setBirthPlace] = useState("Não informada");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+
+  // Consent states
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const [ageConfirmed, setAgeConfirmed] = useState(false);
 
   // Anti-abuse security & verification states
   const [honeypot, setHoneypot] = useState("");
@@ -105,6 +107,13 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
       return;
     }
 
+    if (!termsAccepted || !privacyAccepted || !ageConfirmed) {
+      setError(
+        "É obrigatório confirmar ser maior de 18 anos e aceitar expressamente os Termos de Uso e a Política de Privacidade."
+      );
+      return;
+    }
+
     setLoading(true);
 
     if (soundEnabled) {
@@ -122,12 +131,9 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
       const firebaseUser = firebaseCredential.user;
       const token = await firebaseUser.getIdToken();
 
-      const backendRes = await fetch("/api/auth/register", {
+      const backendRes = await apiFetch("/api/auth/register", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           birthName,
           birthDate,
@@ -137,8 +143,12 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
           deviceId: getDeviceFingerprint(),
           browser: navigator.userAgent,
           session: sessionSign,
-          honeypot
-        })
+          honeypot,
+          termsAccepted: true,
+          privacyAccepted: true,
+          termsVersion: "1.0",
+          privacyVersion: "1.0",
+        }),
       });
 
             const backendData = await parseApiResponse<{
@@ -225,12 +235,9 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
 
       const token = await firebaseUser.getIdToken(true);
 
-      const backendRes = await fetch("/api/auth/login", {
+      const backendRes = await apiFetch("/api/auth/login", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           email: firebaseUser.email
         })
@@ -351,12 +358,9 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
 
       const token = await firebaseUser.getIdToken(true);
 
-      const backendRes = await fetch("/api/auth/login", {
+      const backendRes = await apiFetch("/api/auth/login", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           email: firebaseUser.email
         })
@@ -644,6 +648,73 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
                     tabIndex={-1}
                     autoComplete="off"
                   />
+                </div>
+
+                {/* Consentimento Legal Obrigatório e Confirmação 18+ */}
+                <div className="space-y-3 pt-3 pb-1 border-t border-zinc-800/80 font-mono text-left">
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none group">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={ageConfirmed}
+                      disabled={loading}
+                      onChange={(e) => setAgeConfirmed(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded border-zinc-700 bg-black text-yellow-500 focus:ring-0 cursor-pointer accent-yellow-500 shrink-0"
+                    />
+                    <span className="text-[11px] text-zinc-300 group-hover:text-amber-100 leading-tight">
+                      Declaro expressamente ter <strong className="text-yellow-400">18 anos de idade ou mais</strong> e plena capacidade civil.
+                    </span>
+                  </label>
+
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none group">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={termsAccepted}
+                      disabled={loading}
+                      onChange={(e) => setTermsAccepted(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded border-zinc-700 bg-black text-yellow-500 focus:ring-0 cursor-pointer accent-yellow-500 shrink-0"
+                    />
+                    <span className="text-[11px] text-zinc-300 group-hover:text-amber-100 leading-tight">
+                      Li e concordo com os{" "}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          openLegal("termos");
+                        }}
+                        className="text-yellow-400 underline hover:text-yellow-300 font-bold cursor-pointer"
+                      >
+                        Termos de Uso
+                      </button>{" "}
+                      (versão 1.0).
+                    </span>
+                  </label>
+
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none group">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={privacyAccepted}
+                      disabled={loading}
+                      onChange={(e) => setPrivacyAccepted(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded border-zinc-700 bg-black text-yellow-500 focus:ring-0 cursor-pointer accent-yellow-500 shrink-0"
+                    />
+                    <span className="text-[11px] text-zinc-300 group-hover:text-amber-100 leading-tight">
+                      Li e concordo com a{" "}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          openLegal("privacidade");
+                        }}
+                        className="text-yellow-400 underline hover:text-yellow-300 font-bold cursor-pointer"
+                      >
+                        Política de Privacidade & LGPD
+                      </button>{" "}
+                      (versão 1.0), autorizando o tratamento oracular dos meus dados.
+                    </span>
+                  </label>
                 </div>
 
                 <button

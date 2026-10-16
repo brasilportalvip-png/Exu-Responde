@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { AudioEngine } from "./components/AudioEngine";
 import { UserProfile, ChatMessage } from "./types";
-import { parseApiResponse } from "./api";
+import { parseApiResponse, apiFetch } from "./api";
 
 // Import custom built components
 import PortalEntrance from "./components/PortalEntrance";
@@ -82,12 +82,9 @@ const SESSION_KEY = "exu_responde_chat_session";
       try {
         const token = await firebaseUser.getIdToken();
 
-        const loginRes = await fetch("/api/auth/login", {
+        const loginRes = await apiFetch("/api/auth/login", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`
-          },
+          token,
           body: JSON.stringify({
             email: firebaseUser.email
           })
@@ -109,10 +106,8 @@ const SESSION_KEY = "exu_responde_chat_session";
         setUser(restoredUser);
         setShowEntranceModal(false);
 
-        const profileRes = await fetch("/api/user/profile", {
-          headers: {
-            "Authorization": `Bearer ${token}`
-          }
+        const profileRes = await apiFetch("/api/user/profile", {
+          token
         });
 
         const profileData = await parseApiResponse<{
@@ -211,10 +206,8 @@ const SESSION_KEY = "exu_responde_chat_session";
 
       const token = await firebaseUser.getIdToken();
 
-      const profileRes = await fetch("/api/user/profile", {
-        headers: {
-          "Authorization": `Bearer ${token}`
-        }
+      const profileRes = await apiFetch("/api/user/profile", {
+        token
       });
 
       const profileData = await profileRes.json();
@@ -315,12 +308,9 @@ const SESSION_KEY = "exu_responde_chat_session";
 
       const token = await firebaseUser.getIdToken();
 
-      const res = await fetch("/api/exu/chat", {
+      const res = await apiFetch("/api/exu/chat", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           text: question,
           type: consultationType

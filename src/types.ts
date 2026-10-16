@@ -27,15 +27,33 @@ export interface UserProfile {
   role: "admin" | "user";
   avatarSeed: string; // Used to display consistent avatar styles
   createdAt: string;
-  
-  // Custom generated spiritual parameters
+  emailVerified?: boolean;
+  termsAccepted?: boolean;
+  privacyAccepted?: boolean;
+  termsVersion?: string;
+  privacyVersion?: string;
+  legalConsentAt?: string;
+
+  // Custom generated spiritual and astrological parameters
   oduPrincipal?: string;
+  oduNumero?: string;
+  oduTipo?: string;
+  oduElemento?: string;
+  oduLicao?: string;
+
+  signoSolar?: string;
+  elementoSigno?: string;
+  planetaRegente?: string;
+
+  elementoDominante?: string;
+  elementoNumerologico?: string;
+
   orixaAfinidade?: string;
   exuAfinidade?: string;
   arquetipoDominante?: string;
   assinaturaEnergetica?: string;
   mapaVibracional?: { Fogo: number; Terra: number; Ar: number; Agua: number };
-  
+
   // Custom numerology parameters
   destinyNumber?: number;
   soulNumber?: number;
