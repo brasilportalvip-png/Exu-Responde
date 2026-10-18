@@ -9,7 +9,7 @@ import { Sparkles, Compass, Flame, Calendar, Award, BookOpen, Clock, Heart, Doll
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, TarotCard } from "../types";
 import { auth } from "../firebase";
-import { apiFetch } from "../api";
+import { apiFetch, generateIdempotencyKey } from "../api";
 
 interface OraculosProps {
   user: UserProfile;
@@ -86,11 +86,14 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
       }
 
       const token = await firebaseUser.getIdToken();
+      const idempotencyKey = generateIdempotencyKey();
       const res = await apiFetch("/api/oraculo/buzios", {
         method: "POST",
         token,
+        idempotencyKey,
         body: JSON.stringify({
-          question: buziosQuestion
+          question: buziosQuestion,
+          idempotencyKey,
         })
       });
 
@@ -149,13 +152,16 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
       }
 
       const token = await firebaseUser.getIdToken();
+      const idempotencyKey = generateIdempotencyKey();
 
       const res = await apiFetch("/api/oraculo/tarot", {
         method: "POST",
         token,
+        idempotencyKey,
         body: JSON.stringify({
           question: tarotQuestion,
-          slotsCount: tarotOption
+          slotsCount: tarotOption,
+          idempotencyKey,
         })
       });
 
@@ -218,13 +224,16 @@ export default function Oraculos({ user, onUpdateUser, openCreditsMenu }: Oracul
       }
 
       const token = await firebaseUser.getIdToken();
+      const idempotencyKey = generateIdempotencyKey();
 
       const res = await apiFetch("/api/oraculo/numerologia", {
         method: "POST",
         token,
+        idempotencyKey,
         body: JSON.stringify({
           birthName: numName,
-          birthDate: numBirthDate
+          birthDate: numBirthDate,
+          idempotencyKey,
         })
       });
 

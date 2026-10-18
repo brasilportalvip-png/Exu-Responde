@@ -9,7 +9,7 @@ import { Send, Sparkles, MessageSquare, Compass, Shield, Flame, BookOpen, Volume
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, ChatMessage } from "../types";
 import { auth } from "../firebase";
-import { apiFetch } from "../api";
+import { apiFetch, generateIdempotencyKey } from "../api";
 
 interface TerreiroChatProps {
   user: UserProfile;
@@ -81,11 +81,17 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
     try {
       const firebaseUser = auth.currentUser;
       const token = firebaseUser ? await firebaseUser.getIdToken() : "";
+      const idempotencyKey = generateIdempotencyKey();
 
       const res = await apiFetch("/api/exu/chat", {
         method: "POST",
         token,
-        body: JSON.stringify({ text: textToSend, type: consultationType })
+        idempotencyKey,
+        body: JSON.stringify({
+          text: textToSend,
+          type: consultationType,
+          idempotencyKey,
+        })
       });
 
       const data = await res.json();
@@ -101,9 +107,9 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
       // Deduct client credit & add XP
       onUpdateUser({
         ...user,
-        credits: data.creditsLeft,
-        xp: user.xp + (data.xpAwarded || 15),
-        level: data.newLevel
+        credits: data.creditsLeft ?? user.credits,
+        xp: user.xp + (data.xpAwarded || 0),
+        level: data.newLevel || user.level
       });
 
     } catch (err: any) {

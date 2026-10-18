@@ -39,8 +39,16 @@ import {
   checkAtomicDurableRateLimit,
   executeCreditDebitTransactional as executeCreditDebitTransactionalCore,
   executeCreditRefundTransactional as executeCreditRefundTransactionalCore,
+  completeConsultationTransactional as completeConsultationTransactionalCore,
+  reconcilePendingOperations as reconcilePendingOperationsCore,
+  buildScopedIdempotencyDocId,
+  computeRequestFingerprint,
   calculateSpiritualLevel,
   type CreditLedgerRecord,
+  type DebitParams,
+  type DebitResult,
+  type RefundResult,
+  type IdempotencyRecord,
 } from "../server/credits.ts";
 import {
   getClientIp,
@@ -100,6 +108,7 @@ function createMockFirestore(): Firestore {
     const col = getColMap(colName);
     return {
       id: docId,
+      colName,
       async get() {
         const data = col.get(docId);
         return {
@@ -116,6 +125,9 @@ function createMockFirestore(): Firestore {
       async update(data: Record<string, any>) {
         const existing = col.get(docId) || {};
         col.set(docId, { ...existing, ...data });
+      },
+      async delete() {
+        col.delete(docId);
       },
     };
   };
@@ -177,6 +189,8 @@ function createMockFirestore(): Firestore {
     };
   };
 
+  let txMutex = Promise.resolve();
+
   return {
     collection(colName: string) {
       const baseQuery = buildQuery(colName);
@@ -211,18 +225,58 @@ function createMockFirestore(): Firestore {
       };
     },
     async runTransaction(updateFunction: (transaction: any) => Promise<any>) {
-      const tx = {
-        async get(ref: any) {
-          return ref.get();
-        },
-        set(ref: any, data: Record<string, any>, options?: { merge?: boolean }) {
-          ref.set(data, options);
-        },
-        update(ref: any, data: Record<string, any>) {
-          ref.update(data);
-        },
+      const executeTx = async () => {
+        let hasWritten = false;
+        const bufferedWrites: Array<() => void> = [];
+
+        const tx = {
+          async get(ref: any) {
+            if (hasWritten) {
+              throw new Error("Firestore transactions require all reads to be executed before all writes.");
+            }
+            return ref.get();
+          },
+          set(ref: any, data: Record<string, any>, options?: { merge?: boolean }) {
+            hasWritten = true;
+            bufferedWrites.push(() => {
+              const col = getColMap(ref.colName);
+              const existing = col.get(ref.id) || {};
+              col.set(ref.id, options?.merge ? { ...existing, ...data } : { ...data });
+            });
+          },
+          update(ref: any, data: Record<string, any>) {
+            hasWritten = true;
+            bufferedWrites.push(() => {
+              const col = getColMap(ref.colName);
+              const existing = col.get(ref.id);
+              if (!existing) {
+                const err: any = new Error(`No document to update: ${ref.id}`);
+                err.code = 5;
+                throw err;
+              }
+              col.set(ref.id, { ...existing, ...data });
+            });
+          },
+          delete(ref: any) {
+            hasWritten = true;
+            bufferedWrites.push(() => {
+              const col = getColMap(ref.colName);
+              col.delete(ref.id);
+            });
+          },
+        };
+
+        const res = await updateFunction(tx);
+        // Atomically apply buffered writes only on transaction success
+        for (const writeOp of bufferedWrites) {
+          writeOp();
+        }
+        return res;
       };
-      return updateFunction(tx);
+
+      const nextPromise = txMutex.then(executeTx, executeTx);
+      txMutex = nextPromise.then(() => {}, () => {});
+      return nextPromise;
     },
   } as unknown as Firestore;
 }
@@ -511,25 +565,35 @@ async function checkDurableRateLimit(
 // ======================================================
 // ARQUITETURA TRANSACIONAL DE CRÉDITOS — LIVRO-RAZÃO (LEDGER)
 // ======================================================
-async function executeCreditDebitTransactional(params: {
-  userRef: any;
-  cost: number;
-  xpAwarded: number;
-  source: CreditLedgerRecord["source"];
-  consultationId?: string;
-  idempotencyKey?: string;
-}) {
+async function executeCreditDebitTransactional(
+  params: DebitParams
+): Promise<DebitResult> {
   return executeCreditDebitTransactionalCore(firestore, params);
 }
 
 async function executeCreditRefundTransactional(params: {
   userRef: any;
-  amount: number;
+  amount?: number;
   originalOperationId: string;
   source: CreditLedgerRecord["source"];
   reason: string;
-}) {
+  idempotencyKey?: string;
+}): Promise<RefundResult> {
   return executeCreditRefundTransactionalCore(firestore, params);
+}
+
+async function completeConsultationTransactional(params: {
+  userId: string;
+  source: CreditLedgerRecord["source"];
+  idempotencyKey?: string;
+  operationId: string;
+  responsePayload: any;
+}): Promise<void> {
+  return completeConsultationTransactionalCore(firestore, params);
+}
+
+async function reconcilePendingOperations() {
+  return reconcilePendingOperationsCore(firestore);
 }
 
 
@@ -3490,15 +3554,25 @@ app.post(
   async (req, res) => {
     const portalUser = (req as any).portalUser;
     const { question, slotsCount } = req.body; // slotsCount: 1 or 3
+    const normalizedSlots = Number(slotsCount) === 3 ? 3 : 1;
 
     if (!await checkDurableRateLimit(`tarot_${portalUser.id}`, 15, 60 * 1000)) {
       return res.status(429).json({ error: "Muitas tiragens em sequência. Aguarde um instante." });
     }
 
-    const cost = slotsCount === 3 ? 3 : 2;
-    const xpAwarded = slotsCount === 3 ? 45 : 30;
+    const idempotencyKey =
+      (req.headers["idempotency-key"] as string)?.trim() ||
+      req.body.idempotencyKey?.trim() ||
+      "";
+    const requestHash = computeRequestFingerprint({
+      question: (question || "").trim(),
+      slotsCount: normalizedSlots,
+    });
 
-    let debitResult: any;
+    const cost = normalizedSlots === 3 ? 3 : 2;
+    const xpAwarded = normalizedSlots === 3 ? 45 : 30;
+
+    let debitResult: DebitResult;
     try {
       debitResult = await executeCreditDebitTransactional({
         userRef: portalUser.ref,
@@ -3506,14 +3580,26 @@ app.post(
         xpAwarded,
         source: "tarot",
         consultationId: "tarot_" + Date.now(),
+        idempotencyKey,
+        requestHash,
+        requestPayloadSummary: `Tarot (${normalizedSlots} carta(s))`,
       });
     } catch (debitErr: any) {
       return res.status(debitErr.status || 400).json({
-        error: debitErr.message || "Créditos insuficientes para acessar este oráculo superior."
+        error: debitErr.message || "Créditos insuficientes para acessar este oráculo superior.",
+        code: debitErr.code,
       });
     }
 
-    const drawn = drawTarotCards(slotsCount === 3 ? 3 : 1);
+    // Se já foi processada anteriormente e persistida com esta mesma chave idempotente, devolve sem novo débito e sem novo sorteio
+    if (debitResult.isAlreadyCommitted && debitResult.persistedResponse) {
+      return res.json({
+        ...debitResult.persistedResponse,
+        alreadyProcessed: true,
+      });
+    }
+
+    const drawn = drawTarotCards(normalizedSlots);
     const tarotContext = formatTarotCards(drawn);
 
     // Perform Gemini AI structured oracle reading
@@ -3574,41 +3660,81 @@ FORMATO:
       });
 
       aiInterpretation = fixPortugueseEncoding(geminiResult.text);
-    } catch (error) {
+    } catch (error: any) {
       console.error("[TAROT] Falha na consulta Gemini:", error);
       try {
-        await executeCreditRefundTransactional({
+        const refundRes = await executeCreditRefundTransactional({
           userRef: portalUser.ref,
           amount: cost,
           originalOperationId: debitResult.operationId,
           source: "tarot",
           reason: "Falha de processamento de oráculo",
+          idempotencyKey,
         });
         return res.status(503).json({
           error: "Os caminhos do oráculo oscilaram. Seus créditos de Axé foram integralmente preservados e estornados.",
-          creditsLeft: debitResult.balanceBefore,
+          creditsLeft: refundRes.balanceAfter,
+          refunded: true,
         });
-      } catch (refundErr) {
-        console.error("[TAROT] Erro ao estornar créditos:", refundErr);
-        aiInterpretation = TEMPLE_FALLBACKS[Math.floor(Math.random() * TEMPLE_FALLBACKS.length)];
+      } catch (refundErr: any) {
+        console.error("[TAROT] Erro crítico ao estornar créditos:", refundErr);
+        await firestore.collection("reconciliations").add({
+          reconciliationId: "rec_" + crypto.randomUUID(),
+          type: "consultation_refund_failed",
+          userId: portalUser.id,
+          operationId: debitResult.operationId,
+          idempotencyKey,
+          amount: cost,
+          source: "tarot",
+          error: String(refundErr?.message || refundErr),
+          status: "reconciliation_required",
+          attempts: 1,
+          createdAt: new Date().toISOString(),
+          lastAttemptAt: new Date().toISOString(),
+        });
+        return res.status(503).json({
+          error: "Ocorreu uma oscilação na resposta. Sua solicitação foi encaminhada para reconciliação prioritária de créditos.",
+          creditsLeft: debitResult.balanceAfter,
+          refunded: false,
+        });
       }
     }
 
-    await firestore.collection("activity_logs").add({
-      userId: portalUser.id,
-      action: "Oráculo - Tarot",
-      details: `Sorteio de ${slotsCount} carta(s). Cartas: ${drawn.map(c => c.nome).join(", ")}. Débito: ${cost} Axé gravado no ledger.`,
-      timestamp: new Date().toISOString()
-    });
-
-    return res.json({
+    const responsePayload = {
       success: true,
       drawn,
       interpretation: aiInterpretation,
       creditsLeft: debitResult.balanceAfter,
       xpAwarded,
-      newLevel: debitResult.newLevel
-    });
+      newLevel: debitResult.newLevel,
+    };
+
+    // Persiste a resposta concluída deterministicamente para garantir idempotência em repetições
+    try {
+      await completeConsultationTransactional({
+        userId: portalUser.id,
+        source: "tarot",
+        idempotencyKey,
+        operationId: debitResult.operationId,
+        responsePayload,
+      });
+    } catch (persistErr) {
+      console.warn("[TAROT] Falha secundária ao persistir resposta no cache de idempotência:", persistErr);
+    }
+
+    // Registro secundário de auditoria — falha aqui não descarta a consulta já concluída
+    try {
+      await firestore.collection("activity_logs").add({
+        userId: portalUser.id,
+        action: "Oráculo - Tarot",
+        details: `Sorteio de ${normalizedSlots} carta(s). Cartas: ${drawn.map((c) => c.nome).join(", ")}. Débito: ${cost} Axé gravado no ledger.`,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (logErr) {
+      console.warn("[TAROT] Falha secundária ao gravar activity_log:", logErr);
+    }
+
+    return res.json(responsePayload);
   }
 );
 
@@ -3632,10 +3758,19 @@ app.post(
       return res.status(400).json({ error: "Para este oráculo, informe sua data de nascimento primeiro no painel de perfil." });
     }
 
+    const idempotencyKey =
+      (req.headers["idempotency-key"] as string)?.trim() ||
+      req.body.idempotencyKey?.trim() ||
+      "";
+    const requestHash = computeRequestFingerprint({
+      birthName: String(birthName || "").trim(),
+      birthDate: String(birthDate || "").trim(),
+    });
+
     const cost = 2;
     const xpAwarded = 25;
 
-    let debitResult: any;
+    let debitResult: DebitResult;
     try {
       debitResult = await executeCreditDebitTransactional({
         userRef: portalUser.ref,
@@ -3643,10 +3778,22 @@ app.post(
         xpAwarded,
         source: "numerologia",
         consultationId: "num_" + Date.now(),
+        idempotencyKey,
+        requestHash,
+        requestPayloadSummary: `Numerologia (${birthName})`,
       });
     } catch (debitErr: any) {
       return res.status(debitErr.status || 400).json({
-        error: debitErr.message || "Créditos insuficientes para calcular mapa cabalístico."
+        error: debitErr.message || "Créditos insuficientes para calcular mapa cabalístico.",
+        code: debitErr.code,
+      });
+    }
+
+    // Se já foi processada anteriormente e persistida com esta mesma chave idempotente, devolve sem novo débito e sem novo cálculo
+    if (debitResult.isAlreadyCommitted && debitResult.persistedResponse) {
+      return res.json({
+        ...debitResult.persistedResponse,
+        alreadyProcessed: true,
       });
     }
 
@@ -3706,84 +3853,88 @@ FORMATO:
 5. Termine com um conselho direto de Exu.
 `;
 
-
-   
-
-
-
-
-
-
-try {
-  const geminiResult = await generateWithGeminiFallback({
-    contents: prompt,
-    systemInstruction:
-      "Você é Exu realizando uma leitura de Numerologia Ancestral. Use obrigatoriamente os números calculados no prompt. Responda de forma espiritual, humana, direta e reflexiva, sem apresentar a leitura como verdade absoluta.",
-  });
-
-  analysis = geminiResult.text;
-
-  console.log(
-    `[NUMEROLOGIA] Modelo utilizado: ${geminiResult.model}`
-  );
-} catch (error) {
-  console.error(
-    "[NUMEROLOGIA] Todos os modelos Gemini falharam:",
-    error
-  );
-
-  analysis =
-    `Seus números da sorte revelam um Caminho de Destino de força ${numDetails.destinyNumber} ` +
-    `e uma Expressão Cósmica ${numDetails.expressionNumber}. ` +
-    `Isto indica que os ventos do elemento ${numDetails.element} estão soprando direções favoráveis ` +
-    `para expansão de seus projetos íntimos. ${TEMPLE_FALLBACKS[2]}`;
-}
-
-
-
-
-
-
-
-
-
- 
-
-
-  } catch (err: any) {
-    console.error("Gemini failed in Numerologia:", err);
-    try {
-      await executeCreditRefundTransactional({
-        userRef: portalUser.ref,
-        amount: cost,
-        originalOperationId: debitResult.operationId,
-        source: "numerologia",
-        reason: "Falha técnica na geração do mapa numerológico",
+      const geminiResult = await generateWithGeminiFallback({
+        contents: prompt,
+        systemInstruction:
+          "Você é Exu realizando uma leitura de Numerologia Ancestral. Use obrigatoriamente os números calculados no prompt. Responda de forma espiritual, humana, direta e reflexiva, sem apresentar a leitura como verdade absoluta.",
       });
-      return res.status(503).json({
-        error: "Houve uma oscilação na leitura cabalística. Seus créditos de Axé foram estornados.",
-        creditsLeft: debitResult.balanceBefore,
-      });
-    } catch (refundErr) {
-      console.error("[NUMEROLOGIA] Erro no reembolso:", refundErr);
+
+      analysis = fixPortugueseEncoding(geminiResult.text);
+    } catch (err: any) {
+      console.error("[NUMEROLOGIA] Falha na consulta Gemini:", err);
+      try {
+        const refundRes = await executeCreditRefundTransactional({
+          userRef: portalUser.ref,
+          amount: cost,
+          originalOperationId: debitResult.operationId,
+          source: "numerologia",
+          reason: "Falha técnica na geração do mapa numerológico",
+          idempotencyKey,
+        });
+        return res.status(503).json({
+          error: "Houve uma oscilação na leitura cabalística. Seus créditos de Axé foram integralmente preservados e estornados.",
+          creditsLeft: refundRes.balanceAfter,
+          refunded: true,
+        });
+      } catch (refundErr: any) {
+        console.error("[NUMEROLOGIA] Erro crítico ao estornar créditos:", refundErr);
+        await firestore.collection("reconciliations").add({
+          reconciliationId: "rec_" + crypto.randomUUID(),
+          type: "consultation_refund_failed",
+          userId: portalUser.id,
+          operationId: debitResult.operationId,
+          idempotencyKey,
+          amount: cost,
+          source: "numerologia",
+          error: String(refundErr?.message || refundErr),
+          status: "reconciliation_required",
+          attempts: 1,
+          createdAt: new Date().toISOString(),
+          lastAttemptAt: new Date().toISOString(),
+        });
+        return res.status(503).json({
+          error: "Ocorreu uma oscilação na resposta. Sua solicitação foi encaminhada para reconciliação prioritária de créditos.",
+          creditsLeft: debitResult.balanceAfter,
+          refunded: false,
+        });
+      }
     }
-  }
 
-  await firestore.collection("activity_logs").add({
-    userId: portalUser.id,
-    action: "Oráculo - Numerologia",
-    details: `Mapa Cabalístico gerado de ${birthName}. Destino ${numDetails.destinyNumber}. Débito: ${cost} Axé registrado no ledger.`,
-    timestamp: new Date().toISOString()
-  });
+    const responsePayload = {
+      success: true,
+      details: { ...numDetails, analysis },
+      creditsLeft: debitResult.balanceAfter,
+      xpAwarded: 25,
+      newLevel: debitResult.newLevel,
+    };
 
-  return res.json({
-    success: true,
-    details: { ...numDetails, analysis },
-    creditsLeft: debitResult.balanceAfter,
-    xpAwarded: 25,
-    newLevel: debitResult.newLevel
+    // Persiste a resposta concluída deterministicamente para garantir idempotência em repetições
+    try {
+      await completeConsultationTransactional({
+        userId: portalUser.id,
+        source: "numerologia",
+        idempotencyKey,
+        operationId: debitResult.operationId,
+        responsePayload,
+      });
+    } catch (persistErr) {
+      console.warn("[NUMEROLOGIA] Falha secundária ao persistir resposta no cache de idempotência:", persistErr);
+    }
+
+    // Registro secundário de auditoria — falha aqui não descarta a consulta já concluída
+    try {
+      await firestore.collection("activity_logs").add({
+        userId: portalUser.id,
+        action: "Oráculo - Numerologia",
+        details: `Mapa Cabalístico gerado de ${birthName}. Destino ${numDetails.destinyNumber}. Débito: ${cost} Axé registrado no ledger.`,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (logErr) {
+      console.warn("[NUMEROLOGIA] Falha secundária ao gravar activity_log:", logErr);
+    }
+
+    return res.json(responsePayload);
   });
-});
 
 
 
@@ -3931,10 +4082,18 @@ app.post(
       return res.status(429).json({ error: "Muitos lançamentos em sequência. Aguarde um instante." });
     }
 
+    const idempotencyKey =
+      (req.headers["idempotency-key"] as string)?.trim() ||
+      req.body.idempotencyKey?.trim() ||
+      "";
+    const requestHash = computeRequestFingerprint({
+      question: (question || "").trim(),
+    });
+
     const cost = 3;
     const xpAwarded = 35;
 
-    let debitResult: any;
+    let debitResult: DebitResult;
     try {
       debitResult = await executeCreditDebitTransactional({
         userRef: portalUser.ref,
@@ -3942,10 +4101,22 @@ app.post(
         xpAwarded,
         source: "buzios",
         consultationId: "buzios_" + Date.now(),
+        idempotencyKey,
+        requestHash,
+        requestPayloadSummary: `Búzios (${(question || "Direcionamento").slice(0, 30)})`,
       });
     } catch (debitErr: any) {
       return res.status(debitErr.status || 400).json({
-        error: debitErr.message || "Créditos insuficientes para lançar os búzios sagrados (necessário 3 Axé)."
+        error: debitErr.message || "Créditos insuficientes para lançar os búzios sagrados (necessário 3 Axé).",
+        code: debitErr.code,
+      });
+    }
+
+    // Se já foi processada anteriormente e persistida com esta mesma chave idempotente, devolve sem novo débito e sem novo sorteio
+    if (debitResult.isAlreadyCommitted && debitResult.persistedResponse) {
+      return res.json({
+        ...debitResult.persistedResponse,
+        alreadyProcessed: true,
       });
     }
 
@@ -3993,42 +4164,82 @@ REGRAS RÍGIDAS DE INTERPRETAÇÃO:
       });
 
       interpretation = fixPortugueseEncoding(geminiResult.text);
-    } catch (err) {
+    } catch (err: any) {
       console.error("[BUZIOS] Falha ao gerar interpretação com Gemini:", err);
 
       try {
-        await executeCreditRefundTransactional({
+        const refundRes = await executeCreditRefundTransactional({
           userRef: portalUser.ref,
           amount: cost,
           originalOperationId: debitResult.operationId,
           source: "buzios",
           reason: "Falha de comunicação no lançamento de búzios",
+          idempotencyKey,
         });
         return res.status(503).json({
           error: "Ocorreu uma oscilação na comunicação espiritual. Seus créditos de Axé foram integralmente preservados e estornados.",
-          creditsLeft: debitResult.balanceBefore
+          creditsLeft: refundRes.balanceAfter,
+          refunded: true,
         });
-      } catch (refundErr) {
-        console.error("[BUZIOS] Erro no reembolso:", refundErr);
-        interpretation = "As águas sagradas acolheram seu pedido. Os búzios apontam caminhos de equilíbrio e proteção.";
+      } catch (refundErr: any) {
+        console.error("[BUZIOS] Erro crítico ao estornar créditos:", refundErr);
+        await firestore.collection("reconciliations").add({
+          reconciliationId: "rec_" + crypto.randomUUID(),
+          type: "consultation_refund_failed",
+          userId: portalUser.id,
+          operationId: debitResult.operationId,
+          idempotencyKey,
+          amount: cost,
+          source: "buzios",
+          error: String(refundErr?.message || refundErr),
+          status: "reconciliation_required",
+          attempts: 1,
+          createdAt: new Date().toISOString(),
+          lastAttemptAt: new Date().toISOString(),
+        });
+        return res.status(503).json({
+          error: "Ocorreu uma oscilação na resposta. Sua solicitação foi encaminhada para reconciliação prioritária de créditos.",
+          creditsLeft: debitResult.balanceAfter,
+          refunded: false,
+        });
       }
     }
 
-    await firestore.collection("activity_logs").add({
-      userId: portalUser.id,
-      action: "Oráculo - Búzios 16 Conchas",
-      details: `Lançamento: ${castResult.abertosCount} abertos. Odù ${castResult.odu.nome}. Débito: ${cost} Axé registrado no ledger.`,
-      timestamp: new Date().toISOString()
-    });
-
-    return res.json({
+    const responsePayload = {
       success: true,
       castResult,
       interpretation,
       creditsLeft: debitResult.balanceAfter,
       xpAwarded,
-      newLevel: debitResult.newLevel
-    });
+      newLevel: debitResult.newLevel,
+    };
+
+    // Persiste a resposta concluída deterministicamente para garantir idempotência em repetições
+    try {
+      await completeConsultationTransactional({
+        userId: portalUser.id,
+        source: "buzios",
+        idempotencyKey,
+        operationId: debitResult.operationId,
+        responsePayload,
+      });
+    } catch (persistErr) {
+      console.warn("[BUZIOS] Falha secundária ao persistir resposta no cache de idempotência:", persistErr);
+    }
+
+    // Registro secundário de auditoria — falha aqui não descarta a consulta já concluída
+    try {
+      await firestore.collection("activity_logs").add({
+        userId: portalUser.id,
+        action: "Oráculo - Búzios 16 Conchas",
+        details: `Lançamento: ${castResult.abertosCount} abertos. Odù ${castResult.odu.nome}. Débito: ${cost} Axé registrado no ledger.`,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (logErr) {
+      console.warn("[BUZIOS] Falha secundária ao gravar activity_log:", logErr);
+    }
+
+    return res.json(responsePayload);
   }
 );
 
@@ -4959,6 +5170,23 @@ app.get(
   }
 );
 
+// Admin API - Run Automated Reconciliation of Stale Operations and Failed Refunds
+app.post(
+  "/api/admin/reconcile",
+  requireFirebaseAuth,
+  requirePortalUser,
+  requirePortalAdmin,
+  async (req, res) => {
+    try {
+      const result = await reconcilePendingOperations();
+      return res.json({ success: true, result });
+    } catch (err: any) {
+      console.error("[ADMIN RECONCILE] Erro na reconciliação:", err);
+      return res.status(500).json({ error: "Falha ao executar reconciliação: " + err.message });
+    }
+  }
+);
+
 // Simulated RAG and Main Chat Executor API (Proxying Gemini Server-Side)
 
 
@@ -5158,9 +5386,18 @@ if (consultationType === "outros") {
 }
 
 
+const idempotencyKey =
+  (req.headers["idempotency-key"] as string)?.trim() ||
+  req.body.idempotencyKey?.trim() ||
+  "";
+const requestHash = computeRequestFingerprint({
+  text: String(text || "").trim(),
+  type: String(consultationType || "comum"),
+});
+
 // Validate Credits
 // Transactional Axé Credits Debit & XP
-let debitResult: any = null;
+let debitResult: DebitResult | null = null;
 if (shouldChargeCredit) {
   try {
     debitResult = await executeCreditDebitTransactional({
@@ -5169,6 +5406,9 @@ if (shouldChargeCredit) {
       xpAwarded,
       source: "chat",
       consultationId: "chat_" + Date.now(),
+      idempotencyKey,
+      requestHash,
+      requestPayloadSummary: `Chat (${consultationType})`,
     });
     user.credits = debitResult.balanceAfter;
     user.xp = debitResult.newXp;
@@ -5178,7 +5418,16 @@ if (shouldChargeCredit) {
       error:
         debitErr.message ||
         `Você precisa de ${creditsCost} créditos de Axé para realizar esta consulta.`,
+      code: debitErr.code,
       creditsLeft: debitErr.available !== undefined ? debitErr.available : user.credits,
+    });
+  }
+
+  // Se já foi processada anteriormente e persistida com esta mesma chave idempotente, devolve sem novo débito e sem nova chamada à IA
+  if (debitResult.isAlreadyCommitted && debitResult.persistedResponse) {
+    return res.json({
+      ...debitResult.persistedResponse,
+      alreadyProcessed: true,
     });
   }
 }
@@ -6003,31 +6252,39 @@ A profundidade da resposta deve corresponder ao tipo de consulta selecionado.
     console.error("Gemini Failure in chat:", err);
     if (debitResult && creditsCost > 0) {
       try {
-        await executeCreditRefundTransactional({
+        const refundRes = await executeCreditRefundTransactional({
           userRef: portalUser.ref,
           amount: creditsCost,
           originalOperationId: debitResult.operationId,
           source: "chat",
           reason: "Falha de comunicação no terreiro virtual",
+          idempotencyKey,
         });
         return res.status(503).json({
           error: "Os caminhos do terreiro oscilaram momentaneamente. Seus créditos de Axé foram integralmente preservados e estornados.",
-          creditsLeft: debitResult.balanceBefore,
+          creditsLeft: refundRes.balanceAfter,
+          refunded: true,
         });
-      } catch (refErr) {
-        console.error("[CHAT] Erro ao estornar crédito do chat:", refErr);
+      } catch (refErr: any) {
+        console.error("[CHAT] Erro crítico ao estornar crédito do chat:", refErr);
         await firestore.collection("reconciliations").add({
-          type: "chat_refund_failed",
+          reconciliationId: "rec_" + crypto.randomUUID(),
+          type: "consultation_refund_failed",
           userId: user.id,
           operationId: debitResult.operationId,
-          creditsCost,
-          error: String(refErr),
+          idempotencyKey,
+          amount: creditsCost,
+          source: "chat",
+          error: String(refErr?.message || refErr),
           status: "reconciliation_required",
+          attempts: 1,
           createdAt: new Date().toISOString(),
+          lastAttemptAt: new Date().toISOString(),
         });
         return res.status(503).json({
           error: "Ocorreu uma oscilação na resposta. Sua solicitação foi encaminhada para reconciliação prioritária de créditos.",
           creditsLeft: debitResult.balanceAfter,
+          refunded: false,
         });
       }
     }
@@ -6056,25 +6313,51 @@ A profundidade da resposta deve corresponder ao tipo de consulta selecionado.
     timestamp: messageTimestamp
   };
 
-  await persistMessages([userMessage, exuMessage]);
+  try {
+    await persistMessages([userMessage, exuMessage]);
+  } catch (persistErr) {
+    console.warn("[CHAT] Falha secundária ao persistir mensagens no histórico:", persistErr);
+  }
 
-  await firestore.collection("activity_logs").add({
-    userId: user.id,
-    action: "Pergunta realizada ao Terreiro",
-    details: shouldChargeCredit
-      ? `Buscador realizou consulta de ${creditsCost} créditos. Ledger: ${debitResult?.operationId || "isento"}.`
-      : "Interação de cortesia/saudação.",
-    timestamp: messageTimestamp
-  });
-
-  return res.json({
+  const responsePayload = {
     success: true,
     userMessage,
     exuMessage,
     creditsLeft: user.credits,
     xpAwarded: shouldChargeCredit ? xpAwarded : 0,
     newLevel: user.level
-  });
+  };
+
+  // Persiste a resposta concluída deterministicamente para garantir idempotência em repetições
+  if (shouldChargeCredit && debitResult && idempotencyKey) {
+    try {
+      await completeConsultationTransactional({
+        userId: user.id,
+        source: "chat",
+        idempotencyKey,
+        operationId: debitResult.operationId,
+        responsePayload,
+      });
+    } catch (idemErr) {
+      console.warn("[CHAT] Falha secundária ao persistir resposta no cache de idempotência:", idemErr);
+    }
+  }
+
+  // Registro secundário de auditoria — falha aqui não descarta a resposta já concluída e persistida
+  try {
+    await firestore.collection("activity_logs").add({
+      userId: user.id,
+      action: "Pergunta realizada ao Terreiro",
+      details: shouldChargeCredit
+        ? `Buscador realizou consulta de ${creditsCost} créditos. Ledger: ${debitResult?.operationId || "isento"}.`
+        : "Interação de cortesia/saudação.",
+      timestamp: messageTimestamp
+    });
+  } catch (logErr) {
+    console.warn("[CHAT] Falha secundária ao gravar activity_log:", logErr);
+  }
+
+  return res.json(responsePayload);
 });
 
 // Vite server development middleware setup or production static bundle delivery
@@ -6103,5 +6386,29 @@ export async function startServer(options: { development?: boolean } = {}) {
   });
 }
 
-export { classifyQuestionIntent, verifyMercadoPagoSignature };
+export function getAppFirestore(): Firestore {
+  initializeFirebaseAdmin();
+  return firestore;
+}
+
+const firestoreProxy = new Proxy({} as Firestore, {
+  get(_target, prop) {
+    initializeFirebaseAdmin();
+    return (firestore as any)[prop];
+  },
+});
+
+export {
+  firestoreProxy as firestore,
+  classifyQuestionIntent,
+  verifyMercadoPagoSignature,
+  executeCreditDebitTransactionalCore,
+  executeCreditRefundTransactionalCore,
+  completeConsultationTransactionalCore,
+  reconcilePendingOperationsCore,
+  buildScopedIdempotencyDocId,
+  computeRequestFingerprint,
+};
 export default app;
+
+
