@@ -10,7 +10,9 @@
     "start": "node dist/server.cjs",
     "clean": "node scripts/clean.js",
     "lint": "tsc --noEmit",
-    "test": "npm run build:test-api && node --no-experimental-require-module --test test/*.test.mjs"
+    "test:unit": "node --no-experimental-require-module --test test/api-startup.test.mjs test/consultation-consistency.test.mjs test/intent.test.mjs test/mercadopago-webhook.test.mjs test/spiritual-profile.test.mjs",
+    "test:emulator": "firebase emulators:exec --only firestore --project demo-exu-responde \"node --no-experimental-require-module --test test/emulator-consultation-consistency.test.mjs\"",
+    "test": "npm run build:test-api && npm run test:unit && npm run test:emulator"
   },
   "engines": {
     "node": "^22.0.0 || ^24.0.0"

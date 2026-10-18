@@ -14,7 +14,7 @@ export interface CreditLedgerRecord {
   xpAfter?: number;
   levelBefore?: string;
   levelAfter?: string;
-  status: "processing" | "committed" | "reversed" | "refunded" | "failed";
+  status: "processing" | "committed" | "completed" | "reversed" | "refunded" | "failed";
   source: "chat" | "tarot" | "numerologia" | "buzios" | "registration" | "mercadopago" | "admin" | "astrologia";
   consultationId?: string;
   originalOperationId?: string;
@@ -25,6 +25,7 @@ export interface CreditLedgerRecord {
   reason?: string;
   createdAt: string;
   committedAt?: string;
+  completedAt?: string;
   reversedAt?: string;
 }
 
@@ -277,7 +278,18 @@ export async function executeCreditDebitTransactional(
         };
       }
 
-      // 5. Se está em processamento concorrente:
+      // 5. Se a consulta já foi estornada (ou falhou definitivamente):
+      // Bloqueia reutilização da chave estornada para proteger contra interferência de processos atrasados
+      if (keyData.status === "refunded" || keyData.status === "failed") {
+        const err: any = new Error(
+          "Esta chave de idempotência refere-se a uma consulta que já foi estornada. Gere uma nova consulta com uma nova chave."
+        );
+        err.status = 409;
+        err.code = "KEY_ALREADY_REFUNDED";
+        throw err;
+      }
+
+      // 6. Se está em processamento concorrente:
       if (keyData.status === "processing") {
         const createdAtMs = new Date(keyData.createdAt || 0).getTime();
         const isStale = Date.now() - createdAtMs > 60_000; // 60 segundos de timeout
@@ -403,44 +415,65 @@ export async function completeConsultationTransactional(
   const now = new Date().toISOString();
   const scopedId = buildScopedIdempotencyDocId(params.userId, params.source, params.idempotencyKey);
   const keyDocRef = firestore.collection("idempotency_keys").doc(scopedId);
+  const ledgerDocRef = firestore.collection("credit_ledger").doc(params.operationId);
 
   await firestore.runTransaction(async (transaction: any) => {
-    // 1. Leitura
-    const keySnap = await transaction.get(keyDocRef);
+    // 1. Leituras estritas
+    const [keySnap, ledgerSnap] = await Promise.all([
+      transaction.get(keyDocRef),
+      transaction.get(ledgerDocRef),
+    ]);
 
     if (!keySnap.exists) {
-      // Cria registro como completed se não existia
-      transaction.set(keyDocRef, {
-        idempotencyKey: params.idempotencyKey,
-        scopedDocId: scopedId,
-        userId: params.userId,
-        source: params.source,
-        operationId: params.operationId,
-        status: "completed",
-        persistedResponse: params.responsePayload,
-        createdAt: now,
-        updatedAt: now,
-        completedAt: now,
-      });
-      return;
+      const err: any = new Error(
+        `Registro de idempotência '${scopedId}' não encontrado para conclusão da consulta.`
+      );
+      err.status = 404;
+      err.code = "OPERATION_NOT_FOUND";
+      throw err;
     }
 
     const keyData = keySnap.data() || {};
-    // Se a consulta foi estornada concorrentemente, não sobrescreve com status completed
-    if (keyData.status === "refunded") {
-      console.warn(
-        `[CONSULTATION] Operação ${params.operationId} já está estornada. Resposta descartada do cache.`
+
+    // Valida correspondência exata de operationId para impedir que processos atrasados interfiram
+    if (keyData.operationId && keyData.operationId !== params.operationId) {
+      const err: any = new Error(
+        `Operação divergente: a chave está vinculada à operação ${keyData.operationId}, mas a conclusão solicitou ${params.operationId}.`
       );
+      err.status = 409;
+      err.code = "OPERATION_ID_MISMATCH";
+      throw err;
+    }
+
+    // Se a consulta foi estornada por processo de timeout/reconciliação, rejeita com erro explícito
+    if (keyData.status === "refunded") {
+      const err: any = new Error(
+        `A consulta vinculada à operação ${params.operationId} já foi estornada e não pode ser concluída.`
+      );
+      err.status = 409;
+      err.code = "OPERATION_ALREADY_REFUNDED";
+      throw err;
+    }
+
+    // Se já foi concluída com a mesma operação, nada mais a alterar
+    if (keyData.status === "completed") {
       return;
     }
 
-    // 2. Escrita
+    // 2. Escritas atômicas
     transaction.update(keyDocRef, {
       status: "completed",
       persistedResponse: params.responsePayload,
       completedAt: now,
       updatedAt: now,
     });
+
+    if (ledgerSnap.exists) {
+      transaction.update(ledgerDocRef, {
+        status: "completed",
+        completedAt: now,
+      });
+    }
   });
 }
 
@@ -648,35 +681,191 @@ export async function executeCreditRefundTransactional(
 }
 
 // ======================================================
+// RECUPERAÇÃO ATÔMICA DE OPERAÇÃO STALE (PROTEÇÃO CONTRA CORRIDA)
+// ======================================================
+export async function recoverStaleOperationTransactional(
+  firestore: any,
+  params: {
+    keyDocId: string;
+    expectedOperationId: string;
+    expectedUserId: string;
+    staleTimeoutMs?: number;
+    reason?: string;
+  }
+): Promise<{
+  resolved: boolean;
+  reason: string;
+  refundOperationId?: string;
+  refundedAmount?: number;
+}> {
+  const timeoutMs = params.staleTimeoutMs ?? 60_000;
+  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const keyDocRef = firestore.collection("idempotency_keys").doc(params.keyDocId);
+  const ledgerDocRef = firestore.collection("credit_ledger").doc(params.expectedOperationId);
+  const userDocRef = firestore.collection("users").doc(params.expectedUserId);
+
+  return firestore.runTransaction(async (transaction: any) => {
+    // 1. Leituras estritas
+    const [keySnap, origSnap, userSnap] = await Promise.all([
+      transaction.get(keyDocRef),
+      transaction.get(ledgerDocRef),
+      transaction.get(userDocRef),
+    ]);
+
+    if (!keySnap.exists) {
+      return { resolved: false, reason: "key_not_found" };
+    }
+
+    const keyData = keySnap.data() || {};
+
+    // PONTO CRÍTICO DE CORRIDA: Se a consulta foi concluída no intervalo de seleção, ABORTA o estorno!
+    if (keyData.status === "completed") {
+      return { resolved: false, reason: "already_completed" };
+    }
+
+    // Se já foi estornada anteriormente, aborta sem debitar/estornar novamente
+    if (keyData.status === "refunded") {
+      return { resolved: false, reason: "already_refunded" };
+    }
+
+    // Se o operationId divergir (outra execução assumiu a chave), aborta
+    if (keyData.operationId && keyData.operationId !== params.expectedOperationId) {
+      return { resolved: false, reason: "operation_mismatch" };
+    }
+
+    // Valida se o registro ainda está stale no momento da transação
+    const createdAtMs = new Date(keyData.createdAt || 0).getTime();
+    if (nowMs - createdAtMs < timeoutMs) {
+      return { resolved: false, reason: "not_stale" };
+    }
+
+    if (!origSnap.exists || !userSnap.exists) {
+      return { resolved: false, reason: "missing_ledger_or_user" };
+    }
+
+    const origData = origSnap.data() || {};
+    if (origData.status === "refunded" || origData.status === "reversed") {
+      // Sincroniza a chave com o ledger já estornado
+      transaction.update(keyDocRef, {
+        status: "refunded",
+        updatedAt: now,
+      });
+      return { resolved: false, reason: "ledger_already_refunded" };
+    }
+
+    const refundAmount = Number(origData.amount || keyData.cost || 0);
+    const xpToRevert = Number(origData.xpAwarded || keyData.xpAwarded || 0);
+    const userData = userSnap.data() || {};
+    const currentCredits = Number(userData.credits || 0);
+    const currentXp = Number(userData.xp || 0);
+
+    const balanceAfter = currentCredits + refundAmount;
+    const newXp = Math.max(0, currentXp - xpToRevert);
+    const newLevel = getSpiritualLevelName(newXp);
+    const refundOpId = "op_ref_" + crypto.randomUUID();
+
+    // 2. Escritas atômicas dentro da transação — nenhuma escrita avulsa externa
+    transaction.update(userDocRef, {
+      credits: balanceAfter,
+      xp: newXp,
+      level: newLevel,
+      updatedAt: now,
+    });
+
+    transaction.update(ledgerDocRef, {
+      status: "refunded",
+      reversedAt: now,
+      refundOperationId: refundOpId,
+    });
+
+    const refundRef = firestore.collection("credit_ledger").doc(refundOpId);
+    transaction.set(refundRef, {
+      operationId: refundOpId,
+      originalOperationId: params.expectedOperationId,
+      userId: userSnap.id,
+      firebaseUid: userData.firebaseUid || "",
+      type: "refund",
+      amount: refundAmount,
+      balanceBefore: currentCredits,
+      balanceAfter,
+      xpBefore: currentXp,
+      xpAfter: newXp,
+      xpAwarded: -xpToRevert,
+      levelBefore: userData.level || "Buscador",
+      levelAfter: newLevel,
+      status: "refunded",
+      source: keyData.source || origData.source || "chat",
+      reason: params.reason || "Reconciliação atômica de consulta stale/interrompida",
+      createdAt: now,
+      committedAt: now,
+    });
+
+    transaction.update(keyDocRef, {
+      status: "refunded",
+      refundOperationId: refundOpId,
+      refundedAt: now,
+      updatedAt: now,
+      staleRecovered: true,
+    });
+
+    return {
+      resolved: true,
+      reason: "refunded_successfully",
+      refundOperationId: refundOpId,
+      refundedAmount: refundAmount,
+    };
+  });
+}
+
+// ======================================================
 // ESTRATÉGIA DE RECUPERAÇÃO E RECONCILIAÇÃO EXPLÍCITA
 // ======================================================
+export interface ReconcileOptions {
+  limit?: number;
+  staleTimeoutMs?: number;
+  startAfterDocId?: string;
+}
+
 export interface ReconcileResult {
   staleCount: number;
   refundedCount: number;
+  skippedCompletedCount: number;
   resolvedReconciliationsCount: number;
   errors: string[];
+  hasMore: boolean;
+  lastProcessedDocId?: string;
 }
 
-export async function reconcilePendingOperations(firestore: any): Promise<ReconcileResult> {
+export async function reconcilePendingOperations(
+  firestore: any,
+  options?: ReconcileOptions
+): Promise<ReconcileResult> {
+  const batchLimit = Math.min(Math.max(1, Number(options?.limit || 25)), 100);
+  const staleTimeoutMs = Math.max(5_000, Number(options?.staleTimeoutMs || 60_000));
+
   const result: ReconcileResult = {
     staleCount: 0,
     refundedCount: 0,
+    skippedCompletedCount: 0,
     resolvedReconciliationsCount: 0,
     errors: [],
+    hasMore: false,
   };
 
   if (!firestore) return result;
 
   const nowMs = Date.now();
-  const staleThresholdIso = new Date(nowMs - 60_000).toISOString();
+  const staleThresholdIso = new Date(nowMs - staleTimeoutMs).toISOString();
 
   // 1. Processa fila de reconciliações pendentes
   try {
-    const recSnap = await firestore
+    let recQuery = firestore
       .collection("reconciliations")
       .where("status", "==", "reconciliation_required")
-      .limit(50)
-      .get();
+      .limit(batchLimit);
+
+    const recSnap = await recQuery.get();
 
     for (const doc of recSnap.docs) {
       const recData = doc.data();
@@ -713,36 +902,41 @@ export async function reconcilePendingOperations(firestore: any): Promise<Reconc
 
   // 2. Processa operações interrompidas em status 'processing' no idempotency_keys
   try {
-    const staleSnap = await firestore
+    let staleQuery = firestore
       .collection("idempotency_keys")
       .where("status", "==", "processing")
-      .limit(50)
-      .get();
+      .limit(batchLimit);
+
+    const staleSnap = await staleQuery.get();
+    if (staleSnap.docs.length >= batchLimit) {
+      result.hasMore = true;
+    }
 
     for (const doc of staleSnap.docs) {
+      result.lastProcessedDocId = doc.id;
       const keyData = doc.data();
       const createdAt = keyData.createdAt || "";
+
       if (createdAt && createdAt < staleThresholdIso) {
         result.staleCount++;
         if (keyData.operationId && keyData.userId) {
           try {
-            const userRef = firestore.collection("users").doc(keyData.userId);
-            await executeCreditRefundTransactional(firestore, {
-              userRef,
-              amount: keyData.cost,
-              originalOperationId: keyData.operationId,
-              source: keyData.source || "chat",
-              reason: "Estorno automático de consulta interrompida (timeout/stale)",
-              idempotencyKey: keyData.idempotencyKey,
+            const recovery = await recoverStaleOperationTransactional(firestore, {
+              keyDocId: doc.id,
+              expectedOperationId: keyData.operationId,
+              expectedUserId: keyData.userId,
+              staleTimeoutMs,
+              reason: "Estorno atômico de consulta stale/interrompida",
             });
-            await doc.ref.update({
-              status: "refunded",
-              refundedAt: new Date().toISOString(),
-              reason: "Estorno automático de consulta interrompida",
-            });
-            result.refundedCount++;
+
+            if (recovery.resolved) {
+              result.refundedCount++;
+            } else if (recovery.reason === "already_completed") {
+              // A consulta terminou e foi salva no intervalo! Não deve ser estornada.
+              result.skippedCompletedCount++;
+            }
           } catch (refundErr: any) {
-            console.error(`[RECONCILE] Falha no auto-estorno de operação stale ${doc.id}:`, refundErr);
+            console.error(`[RECONCILE] Falha no auto-estorno atômico ${doc.id}:`, refundErr);
             result.errors.push(`Stale op ${doc.id}: ${refundErr.message}`);
           }
         }

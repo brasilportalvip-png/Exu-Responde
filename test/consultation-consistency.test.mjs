@@ -498,3 +498,36 @@ test("Recuperação: reconcilePendingOperations identifica operações stale e a
   const userDocAfter = await userRef.get();
   assert.equal(userDocAfter.data().credits, 5, "Créditos do consulente devem ter sido integralmente estornados");
 });
+
+// ========================================================
+// 8. ENDPOINTS DE RECONCILIAÇÃO: CRON E ADMIN AUTENTICADOS
+// ========================================================
+
+test("Reconciliação Cron: /api/cron/reconcile aceita GET com paginação e processamento limitado", async () => {
+  const res = await requestFromTemporaryServer("/api/cron/reconcile?limit=10&staleSeconds=30", {
+    method: "GET",
+  });
+
+  const body = await res.json();
+  assert.equal(res.status, 200, "Deve aceitar GET no endpoint de cron");
+  assert.equal(body.success, true);
+  assert.ok(body.processed !== undefined);
+  assert.ok(typeof body.processed.staleDetected === "number");
+  assert.ok(typeof body.processed.staleRefunded === "number");
+  assert.ok(typeof body.processed.skippedAlreadyCompleted === "number");
+});
+
+test("Reconciliação Admin: /api/admin/reconcile rejeita usuários sem privilégio de administrador", async () => {
+  const normalUser = await createTestUser("normal_user");
+
+  const res = await requestFromTemporaryServer("/api/admin/reconcile", {
+    method: "POST",
+    headers: {
+      "Authorization": normalUser.authHeader,
+      "X-Forwarded-For": normalUser.fakeIp,
+    },
+  });
+
+  assert.equal(res.status, 403, "Usuário normal não pode invocar endpoint de admin");
+});
+

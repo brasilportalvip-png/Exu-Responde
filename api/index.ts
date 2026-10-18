@@ -40,6 +40,7 @@ import {
   executeCreditDebitTransactional as executeCreditDebitTransactionalCore,
   executeCreditRefundTransactional as executeCreditRefundTransactionalCore,
   completeConsultationTransactional as completeConsultationTransactionalCore,
+  recoverStaleOperationTransactional as recoverStaleOperationTransactionalCore,
   reconcilePendingOperations as reconcilePendingOperationsCore,
   buildScopedIdempotencyDocId,
   computeRequestFingerprint,
@@ -49,6 +50,8 @@ import {
   type DebitResult,
   type RefundResult,
   type IdempotencyRecord,
+  type ReconcileOptions,
+  type ReconcileResult,
 } from "../server/credits.ts";
 import {
   getClientIp,
@@ -307,6 +310,21 @@ function createMockFirebaseAuth(): Auth {
 
 function initializeFirebaseAdmin(): void {
   if (firestore && firebaseAuth) {
+    return;
+  }
+
+  // Suporte a execução de testes reais com Firestore Emulator
+  if (process.env.FIRESTORE_EMULATOR_HOST) {
+    if (!getApps().length) {
+      const projectId =
+        process.env.FIREBASE_PROJECT_ID?.trim() ||
+        process.env.GCLOUD_PROJECT?.trim() ||
+        "demo-exu-responde";
+      initializeApp({ projectId });
+    }
+    firestore = getFirestore();
+    firebaseAuth = createMockFirebaseAuth();
+    firebaseInitializationError = null;
     return;
   }
 
@@ -592,8 +610,8 @@ async function completeConsultationTransactional(params: {
   return completeConsultationTransactionalCore(firestore, params);
 }
 
-async function reconcilePendingOperations() {
-  return reconcilePendingOperationsCore(firestore);
+async function reconcilePendingOperations(options?: ReconcileOptions): Promise<ReconcileResult> {
+  return reconcilePendingOperationsCore(firestore, options);
 }
 
 
@@ -3709,7 +3727,7 @@ FORMATO:
       newLevel: debitResult.newLevel,
     };
 
-    // Persiste a resposta concluída deterministicamente para garantir idempotência em repetições
+    // Persistência obrigatória da resposta essencial da consulta
     try {
       await completeConsultationTransactional({
         userId: portalUser.id,
@@ -3718,8 +3736,43 @@ FORMATO:
         operationId: debitResult.operationId,
         responsePayload,
       });
-    } catch (persistErr) {
-      console.warn("[TAROT] Falha secundária ao persistir resposta no cache de idempotência:", persistErr);
+    } catch (persistErr: any) {
+      console.error("[TAROT] Falha crítica ao persistir resposta da consulta:", persistErr);
+      let refunded = false;
+      let refundResult: RefundResult | null = null;
+      try {
+        const userRef = firestore.collection("users").doc(portalUser.id);
+        refundResult = await executeCreditRefundTransactional({
+          userRef,
+          amount: cost,
+          originalOperationId: debitResult.operationId,
+          source: "tarot",
+          reason: "Estorno automático: falha ao persistir resposta recuperável da consulta",
+          idempotencyKey,
+        });
+        refunded = true;
+      } catch (refundErr: any) {
+        console.error("[TAROT] Falha ao estornar após erro de persistência:", refundErr);
+        await firestore.collection("reconciliations").add({
+          type: "consultation_persistence_refund_failed",
+          userId: portalUser.id,
+          operationId: debitResult.operationId,
+          amount: cost,
+          source: "tarot",
+          status: "reconciliation_required",
+          error: String(persistErr?.message || persistErr),
+          createdAt: new Date().toISOString(),
+          attempts: 0,
+        });
+      }
+      return res.status(500).json({
+        success: false,
+        error: refunded
+          ? "Não foi possível registrar com segurança a resposta do oráculo. Seus créditos foram integralmente estornados. Por favor, tente novamente."
+          : "Falha ao registrar a resposta da consulta. Seus créditos estão em fila de reconciliação para estorno automático.",
+        refunded,
+        creditsLeft: refundResult ? refundResult.balanceAfter : debitResult.balanceAfter,
+      });
     }
 
     // Registro secundário de auditoria — falha aqui não descarta a consulta já concluída
@@ -3908,7 +3961,7 @@ FORMATO:
       newLevel: debitResult.newLevel,
     };
 
-    // Persiste a resposta concluída deterministicamente para garantir idempotência em repetições
+    // Persistência obrigatória da resposta essencial da consulta
     try {
       await completeConsultationTransactional({
         userId: portalUser.id,
@@ -3917,8 +3970,43 @@ FORMATO:
         operationId: debitResult.operationId,
         responsePayload,
       });
-    } catch (persistErr) {
-      console.warn("[NUMEROLOGIA] Falha secundária ao persistir resposta no cache de idempotência:", persistErr);
+    } catch (persistErr: any) {
+      console.error("[NUMEROLOGIA] Falha crítica ao persistir resposta da consulta:", persistErr);
+      let refunded = false;
+      let refundResult: RefundResult | null = null;
+      try {
+        const userRef = firestore.collection("users").doc(portalUser.id);
+        refundResult = await executeCreditRefundTransactional({
+          userRef,
+          amount: cost,
+          originalOperationId: debitResult.operationId,
+          source: "numerologia",
+          reason: "Estorno automático: falha ao persistir resposta recuperável de numerologia",
+          idempotencyKey,
+        });
+        refunded = true;
+      } catch (refundErr: any) {
+        console.error("[NUMEROLOGIA] Falha ao estornar após erro de persistência:", refundErr);
+        await firestore.collection("reconciliations").add({
+          type: "consultation_persistence_refund_failed",
+          userId: portalUser.id,
+          operationId: debitResult.operationId,
+          amount: cost,
+          source: "numerologia",
+          status: "reconciliation_required",
+          error: String(persistErr?.message || persistErr),
+          createdAt: new Date().toISOString(),
+          attempts: 0,
+        });
+      }
+      return res.status(500).json({
+        success: false,
+        error: refunded
+          ? "Não foi possível registrar com segurança o mapa de numerologia. Seus créditos foram integralmente estornados. Por favor, tente novamente."
+          : "Falha ao registrar a resposta da consulta. Seus créditos estão em fila de reconciliação para estorno automático.",
+        refunded,
+        creditsLeft: refundResult ? refundResult.balanceAfter : debitResult.balanceAfter,
+      });
     }
 
     // Registro secundário de auditoria — falha aqui não descarta a consulta já concluída
@@ -4214,7 +4302,7 @@ REGRAS RÍGIDAS DE INTERPRETAÇÃO:
       newLevel: debitResult.newLevel,
     };
 
-    // Persiste a resposta concluída deterministicamente para garantir idempotência em repetições
+    // Persistência obrigatória da resposta essencial da consulta
     try {
       await completeConsultationTransactional({
         userId: portalUser.id,
@@ -4223,8 +4311,43 @@ REGRAS RÍGIDAS DE INTERPRETAÇÃO:
         operationId: debitResult.operationId,
         responsePayload,
       });
-    } catch (persistErr) {
-      console.warn("[BUZIOS] Falha secundária ao persistir resposta no cache de idempotência:", persistErr);
+    } catch (persistErr: any) {
+      console.error("[BUZIOS] Falha crítica ao persistir resposta da consulta:", persistErr);
+      let refunded = false;
+      let refundResult: RefundResult | null = null;
+      try {
+        const userRef = firestore.collection("users").doc(portalUser.id);
+        refundResult = await executeCreditRefundTransactional({
+          userRef,
+          amount: cost,
+          originalOperationId: debitResult.operationId,
+          source: "buzios",
+          reason: "Estorno automático: falha ao persistir resposta recuperável de búzios",
+          idempotencyKey,
+        });
+        refunded = true;
+      } catch (refundErr: any) {
+        console.error("[BUZIOS] Falha ao estornar após erro de persistência:", refundErr);
+        await firestore.collection("reconciliations").add({
+          type: "consultation_persistence_refund_failed",
+          userId: portalUser.id,
+          operationId: debitResult.operationId,
+          amount: cost,
+          source: "buzios",
+          status: "reconciliation_required",
+          error: String(persistErr?.message || persistErr),
+          createdAt: new Date().toISOString(),
+          attempts: 0,
+        });
+      }
+      return res.status(500).json({
+        success: false,
+        error: refunded
+          ? "Não foi possível registrar com segurança o lançamento de búzios. Seus créditos foram integralmente estornados. Por favor, tente novamente."
+          : "Falha ao registrar a resposta da consulta. Seus créditos estão em fila de reconciliação para estorno automático.",
+        refunded,
+        creditsLeft: refundResult ? refundResult.balanceAfter : debitResult.balanceAfter,
+      });
     }
 
     // Registro secundário de auditoria — falha aqui não descarta a consulta já concluída
@@ -5170,6 +5293,58 @@ app.get(
   }
 );
 
+// Vercel Cron API - Automated Scheduled Reconciliation
+app.all("/api/cron/reconcile", async (req, res) => {
+  if (req.method !== "GET" && req.method !== "POST") {
+    return res.status(405).json({ error: "Método não permitido. Utilize GET ou POST." });
+  }
+
+  // Validação estrita do token do agendador (Vercel Cron Bearer Token)
+  const cronSecret = process.env.CRON_SECRET?.trim();
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : "";
+
+  if (checkIsProduction()) {
+    if (!cronSecret || token !== cronSecret) {
+      console.warn("[CRON RECONCILE] Tentativa de acesso não autorizada ao endpoint de cron.");
+      return res.status(401).json({
+        error: "Unauthorized: CRON_SECRET obrigatório e não configurado ou token inválido em produção.",
+      });
+    }
+  } else {
+    if (cronSecret && token !== cronSecret) {
+      return res.status(401).json({ error: "Unauthorized: Token de cron inválido." });
+    }
+  }
+
+  try {
+    const limit = Math.min(Math.max(1, Number(req.query.limit || 25)), 100);
+    const staleSeconds = Math.max(10, Number(req.query.staleSeconds || 60));
+
+    const result = await reconcilePendingOperations({
+      limit,
+      staleTimeoutMs: staleSeconds * 1000,
+    });
+
+    console.log("[CRON RECONCILE] Ciclo de reconciliação executado com sucesso:", result);
+    return res.json({
+      success: true,
+      processed: {
+        staleDetected: result.staleCount,
+        staleRefunded: result.refundedCount,
+        skippedAlreadyCompleted: result.skippedCompletedCount,
+        reconciliationsResolved: result.resolvedReconciliationsCount,
+        errors: result.errors,
+      },
+      hasMore: result.hasMore,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.error("[CRON RECONCILE] Falha durante reconciliação:", err);
+    return res.status(500).json({ error: "Falha na execução do cron: " + err.message });
+  }
+});
+
 // Admin API - Run Automated Reconciliation of Stale Operations and Failed Refunds
 app.post(
   "/api/admin/reconcile",
@@ -5178,7 +5353,12 @@ app.post(
   requirePortalAdmin,
   async (req, res) => {
     try {
-      const result = await reconcilePendingOperations();
+      const limit = Math.min(Math.max(1, Number(req.query.limit || 25)), 100);
+      const staleSeconds = Math.max(10, Number(req.query.staleSeconds || 60));
+      const result = await reconcilePendingOperations({
+        limit,
+        staleTimeoutMs: staleSeconds * 1000,
+      });
       return res.json({ success: true, result });
     } catch (err: any) {
       console.error("[ADMIN RECONCILE] Erro na reconciliação:", err);
@@ -6328,7 +6508,7 @@ A profundidade da resposta deve corresponder ao tipo de consulta selecionado.
     newLevel: user.level
   };
 
-  // Persiste a resposta concluída deterministicamente para garantir idempotência em repetições
+  // Persistência obrigatória da resposta essencial da consulta
   if (shouldChargeCredit && debitResult && idempotencyKey) {
     try {
       await completeConsultationTransactional({
@@ -6338,8 +6518,43 @@ A profundidade da resposta deve corresponder ao tipo de consulta selecionado.
         operationId: debitResult.operationId,
         responsePayload,
       });
-    } catch (idemErr) {
-      console.warn("[CHAT] Falha secundária ao persistir resposta no cache de idempotência:", idemErr);
+    } catch (idemErr: any) {
+      console.error("[CHAT] Falha crítica ao persistir resposta da consulta:", idemErr);
+      let refunded = false;
+      let refundResult: RefundResult | null = null;
+      try {
+        const userRef = firestore.collection("users").doc(user.id);
+        refundResult = await executeCreditRefundTransactional({
+          userRef,
+          amount: creditsCost,
+          originalOperationId: debitResult.operationId,
+          source: "chat",
+          reason: "Estorno automático: falha ao persistir resposta recuperável do chat",
+          idempotencyKey,
+        });
+        refunded = true;
+      } catch (refundErr: any) {
+        console.error("[CHAT] Falha ao estornar após erro de persistência:", refundErr);
+        await firestore.collection("reconciliations").add({
+          type: "consultation_persistence_refund_failed",
+          userId: user.id,
+          operationId: debitResult.operationId,
+          amount: creditsCost,
+          source: "chat",
+          status: "reconciliation_required",
+          error: String(idemErr?.message || idemErr),
+          createdAt: new Date().toISOString(),
+          attempts: 0,
+        });
+      }
+      return res.status(500).json({
+        success: false,
+        error: refunded
+          ? "Não foi possível registrar com segurança a resposta do terreiro. Seus créditos foram integralmente estornados. Por favor, tente novamente."
+          : "Falha ao registrar a resposta da consulta. Seus créditos estão em fila de reconciliação para estorno automático.",
+        refunded,
+        creditsLeft: refundResult ? refundResult.balanceAfter : debitResult.balanceAfter,
+      });
     }
   }
 
@@ -6405,6 +6620,7 @@ export {
   executeCreditDebitTransactionalCore,
   executeCreditRefundTransactionalCore,
   completeConsultationTransactionalCore,
+  recoverStaleOperationTransactionalCore,
   reconcilePendingOperationsCore,
   buildScopedIdempotencyDocId,
   computeRequestFingerprint,
