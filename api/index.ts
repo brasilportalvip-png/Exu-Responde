@@ -313,8 +313,15 @@ function initializeFirebaseAdmin(): void {
     return;
   }
 
-  // Suporte a execução de testes reais com Firestore Emulator
+  // Suporte a execução de testes reais com Firestore Emulator (apenas em dev/teste)
   if (process.env.FIRESTORE_EMULATOR_HOST) {
+    if (checkIsProduction()) {
+      const err = new Error(
+        "[SEGURANÇA] FIRESTORE_EMULATOR_HOST e autenticação simulada são estritamente proibidos em ambiente de produção."
+      );
+      firebaseInitializationError = err;
+      throw err;
+    }
     if (!getApps().length) {
       const projectId =
         process.env.FIREBASE_PROJECT_ID?.trim() ||

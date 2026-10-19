@@ -2,14 +2,13 @@ import { GoogleGenAI } from "@google/genai";
 
 // ======================================================
 // CONFIGURAÇÃO OFICIAL DOS MODELOS GEMINI (ANTIQUEDA)
-// Ordem rigorosa: gemini-3.8-flash -> gemini-flash-latest -> gemini-3.1-flash-lite
-// Modelos oficiais disponíveis no SDK @google/genai
+// Modelos oficiais do SDK @google/genai com fallback progressivo
 // ======================================================
 
 export const GEMINI_MODELS = [
-  process.env.GEMINI_PRIMARY_MODEL?.trim() || "gemini-3.8-flash",
-  process.env.GEMINI_SECONDARY_MODEL?.trim() || "gemini-flash-latest",
-  process.env.GEMINI_LITE_MODEL?.trim() || "gemini-3.1-flash-lite",
+  process.env.GEMINI_PRIMARY_MODEL?.trim() || "gemini-2.5-flash",
+  process.env.GEMINI_SECONDARY_MODEL?.trim() || "gemini-1.5-flash",
+  process.env.GEMINI_LITE_MODEL?.trim() || "gemini-2.0-flash",
 ].filter((model, index, arr): model is string => Boolean(model) && arr.indexOf(model) === index);
 
 export interface GeminiTelemetryResult {
@@ -21,9 +20,10 @@ export interface GeminiTelemetryResult {
   latencyMs: number;
 }
 
-export const GEMINI_GLOBAL_TIMEOUT_MS = 45_000;
-export const GEMINI_REQUEST_TIMEOUT_MS = 18_000;
-export const MAX_ATTEMPTS_PER_MODEL = 2; // Até 2 tentativas por modelo apenas se o erro for recuperável
+// Orçamento total equilibrado (22s) para não exceder limites de serverless e reservar tempo para persistência/estorno
+export const GEMINI_GLOBAL_TIMEOUT_MS = 22_000;
+export const GEMINI_REQUEST_TIMEOUT_MS = 7_500;
+export const MAX_ATTEMPTS_PER_MODEL = 2; // Até 2 tentativas por modelo apenas se o erro for transitório/recuperável
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -37,12 +37,26 @@ export function getGeminiErrorStatus(error: unknown): number | null {
 
 export function isRetryableGeminiError(error: unknown): boolean {
   const status = getGeminiErrorStatus(error);
-  if ([408, 429, 500, 502, 503, 504].includes(status ?? 0)) {
+  // Erros definitivos (400 bad request, 401 unauthenticated, 403 forbidden, 404 not found) NUNCA devem ser retentados no mesmo modelo
+  if (status && [400, 401, 403, 404].includes(status)) {
+    return false;
+  }
+
+  if (status && [408, 429, 500, 502, 503, 504].includes(status)) {
     return true;
   }
 
   const message =
     error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+
+  if (
+    message.includes("api key not valid") ||
+    message.includes("unauthenticated") ||
+    message.includes("permission denied") ||
+    message.includes("not found")
+  ) {
+    return false;
+  }
 
   return (
     message.includes("timeout") ||
@@ -81,9 +95,10 @@ export async function executeGeminiWithFallback(
       const elapsed = Date.now() - startTime;
       const remainingBudget = GEMINI_GLOBAL_TIMEOUT_MS - elapsed;
 
-      if (remainingBudget < 2500) {
+      // Reserva de segurança de ao menos 2 segundos
+      if (remainingBudget < 2000) {
         throw new Error(
-          `Orçamento global de tempo (${Math.round(GEMINI_GLOBAL_TIMEOUT_MS / 1000)}s) esgotado para consulta espiritual.`
+          `Orçamento de tempo (${Math.round(GEMINI_GLOBAL_TIMEOUT_MS / 1000)}s) atingido para a chamada de IA.`
         );
       }
 
@@ -134,28 +149,28 @@ export async function executeGeminiWithFallback(
         const retryable = isRetryableGeminiError(err);
         errors.push(`${model} (tentativa ${attempt}): ${errMsg}`);
 
-        // Se o erro NÃO for recuperável (400, 401, 403, modelo inexistente), não adianta retentar o mesmo modelo
+        // Se o erro NÃO for transitório (erro de chave, permissão, payload inválido), pula imediatamente para fallback
         if (!retryable) {
           fallbackReasons.push(`${model}: Erro definitivo [${errMsg}]`);
           break;
         }
 
-        // Se esgotou as tentativas no modelo atual, avança para o próximo modelo na hierarquia
+        // Se esgotou as tentativas no modelo atual, avança para o próximo modelo na esteira
         if (attempt >= MAX_ATTEMPTS_PER_MODEL) {
           fallbackReasons.push(`${model}: ${MAX_ATTEMPTS_PER_MODEL} tentativas esgotadas [${errMsg}]`);
           break;
         }
 
-        // Backoff exponencial com jitter
-        const jitter = Math.floor(Math.random() * 300);
-        const delay = Math.min(2500, 600 * Math.pow(2, attempt - 1) + jitter);
+        // Backoff rápido com jitter
+        const jitter = Math.floor(Math.random() * 200);
+        const delay = Math.min(1500, 400 * Math.pow(2, attempt - 1) + jitter);
         await sleep(delay);
       }
     }
 
     if (modelIndex < GEMINI_MODELS.length - 1) {
       fallbackCount++;
-      await sleep(500);
+      await sleep(250);
     }
   }
 

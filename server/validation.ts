@@ -75,17 +75,35 @@ export function parseBirthDateStrict(birthDate: string): {
   return { year, month, day, isValid: true, isAdult };
 }
 
+// Validação de horário real (00:00 a 23:59)
+export const realTimeRegex = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+export const idempotencyKeySchema = z
+  .string()
+  .trim()
+  .min(8, "Chave de idempotência deve conter ao menos 8 caracteres.")
+  .max(128, "Chave de idempotência não pode exceder 128 caracteres.")
+  .regex(/^[a-zA-Z0-9_\-]+$/, "Chave de idempotência deve conter apenas letras, números, hífen e sublinhado.");
+
 export const registerBodySchema = z.object({
   birthName: z.string().trim().min(2, "Nome deve ter ao menos 2 caracteres").max(100, "Nome muito longo"),
-  birthDate: z.string().trim().refine((val) => {
-    const parsed = parseBirthDateStrict(val);
-    return parsed.isValid;
-  }, { message: "Data de nascimento inválida (use o formato AAAA-MM-DD)." })
-  .refine((val) => {
-    const parsed = parseBirthDateStrict(val);
-    return parsed.isAdult;
-  }, { message: "O portal é restrito para maiores de 18 anos conforme os Termos de Uso." }),
-  birthTime: z.string().trim().regex(/^(\d{2}:\d{2})?$/, "Horário deve ser no formato HH:mm").optional().default(""),
+  birthDate: z
+    .string()
+    .trim()
+    .refine((val) => parseBirthDateStrict(val).isValid, {
+      message: "Data de nascimento inválida (use o formato AAAA-MM-DD).",
+    })
+    .refine((val) => parseBirthDateStrict(val).isAdult, {
+      message: "O portal é restrito para maiores de 18 anos conforme os Termos de Uso.",
+    }),
+  birthTime: z
+    .string()
+    .trim()
+    .refine((val) => !val || realTimeRegex.test(val), {
+      message: "Horário deve ser um horário real entre 00:00 e 23:59.",
+    })
+    .optional()
+    .default(""),
   birthPlace: z.string().trim().max(100, "Local muito longo").optional().default(""),
   email: z.string().trim().email("E-mail inválido").max(150),
   deviceId: z.string().trim().max(100).optional().default("dev_not_tracked"),
@@ -93,10 +111,10 @@ export const registerBodySchema = z.object({
   session: z.string().trim().max(150).optional().default("unknown"),
   honeypot: z.string().max(50).optional(),
   termsAccepted: z.literal(true, {
-    message: "Você deve aceitar os Termos de Uso para prosseguir."
+    message: "Você deve aceitar os Termos de Uso para prosseguir.",
   }),
   privacyAccepted: z.literal(true, {
-    message: "Você deve aceitar a Política de Privacidade para prosseguir."
+    message: "Você deve aceitar a Política de Privacidade para prosseguir.",
   }),
   termsVersion: z.string().trim().min(1, "Versão dos termos obrigatória").optional().default("1.0"),
   privacyVersion: z.string().trim().min(1, "Versão da política obrigatória").optional().default("1.0"),
@@ -105,49 +123,82 @@ export const registerBodySchema = z.object({
 export const userUpdateSchema = z.object({
   name: z.string().trim().min(2, "Nome deve ter ao menos 2 caracteres").max(100).optional(),
   birthName: z.string().trim().min(2, "Nome natal deve ter ao menos 2 caracteres").max(100).optional(),
-  birthDate: z.string().trim().refine((val) => !val || parseBirthDateStrict(val).isValid, {
-    message: "Data de nascimento inválida (use o formato AAAA-MM-DD)."
-  }).optional(),
-  birthTime: z.string().trim().regex(/^(\d{2}:\d{2})?$/, "Horário deve ser no formato HH:mm").optional().default(""),
+  birthDate: z
+    .string()
+    .trim()
+    .refine((val) => !val || parseBirthDateStrict(val).isValid, {
+      message: "Data de nascimento inválida (use o formato AAAA-MM-DD).",
+    })
+    .optional(),
+  birthTime: z
+    .string()
+    .trim()
+    .refine((val) => !val || realTimeRegex.test(val), {
+      message: "Horário deve ser um horário real entre 00:00 e 23:59.",
+    })
+    .optional()
+    .default(""),
   birthPlace: z.string().trim().max(100, "Local muito longo").optional().default(""),
 });
 
 export const chatBodySchema = z.object({
   text: z.string().trim().min(1, "Mensagem vazia").max(2000, "Mensagem não pode exceder 2000 caracteres"),
   type: z.enum(["comum", "completa", "outros"]).optional().default("comum"),
-  timezone: z.string().trim().max(64).optional()
+  timezone: z.string().trim().max(64).optional(),
+  idempotencyKey: idempotencyKeySchema.optional(),
 });
 
 export const tarotBodySchema = z.object({
   slotsCount: z.union([z.literal(1), z.literal(3)]).optional().default(1),
   question: z.string().trim().max(500, "Pergunta não pode exceder 500 caracteres").optional().default(""),
-  timezone: z.string().trim().max(64).optional()
+  timezone: z.string().trim().max(64).optional(),
+  idempotencyKey: idempotencyKeySchema,
 });
 
 export const buziosBodySchema = z.object({
   question: z.string().trim().max(500, "Pergunta não pode exceder 500 caracteres").optional().default(""),
-  timezone: z.string().trim().max(64).optional()
+  timezone: z.string().trim().max(64).optional(),
+  idempotencyKey: idempotencyKeySchema,
 });
 
 export const numerologiaBodySchema = z.object({
   birthName: z.string().trim().max(100).optional(),
-  birthDate: z.string().trim().refine((val) => parseBirthDateStrict(val).isValid, {
-    message: "Data de nascimento inválida (use AAAA-MM-DD)."
-  }),
-  timezone: z.string().trim().max(64).optional()
+  birthDate: z
+    .string()
+    .trim()
+    .refine((val) => parseBirthDateStrict(val).isValid, {
+      message: "Data de nascimento inválida (use o formato AAAA-MM-DD).",
+    }),
+  timezone: z.string().trim().max(64).optional(),
+  idempotencyKey: idempotencyKeySchema,
 });
 
 export const astrologiaBodySchema = z.object({
-  birthDate: z.string().trim().refine((val) => parseBirthDateStrict(val).isValid, {
-    message: "Data de nascimento inválida (use AAAA-MM-DD)."
-  }),
-  timezone: z.string().trim().max(64).optional()
+  birthDate: z
+    .string()
+    .trim()
+    .refine((val) => parseBirthDateStrict(val).isValid, {
+      message: "Data de nascimento inválida (use o formato AAAA-MM-DD).",
+    }),
+  birthTime: z
+    .string()
+    .trim()
+    .refine((val) => !val || realTimeRegex.test(val), {
+      message: "Horário deve ser um horário real entre 00:00 e 23:59.",
+    })
+    .optional(),
+  birthPlace: z.string().trim().max(100).optional(),
+  timezone: z.string().trim().max(64).optional(),
+  idempotencyKey: idempotencyKeySchema.optional(),
 });
 
 export const adminCreditAdjustSchema = z.object({
   targetUserId: z.string().trim().min(1, "ID do usuário obrigatório"),
-  amount: z.number().int("Quantidade deve ser inteira").refine((n) => n !== 0, "Valor não pode ser zero").refine((n) => n >= -1000 && n <= 1000, "Valor fora do limite seguro (-1000 a 1000)"),
-  reason: z.string().trim().min(3, "Informe um motivo com pelo menos 3 caracteres").max(250, "Motivo muito longo")
+  amount: z
+    .number()
+    .int("Quantidade de créditos deve ser um número inteiro")
+    .finite("Valor deve ser finito")
+    .refine((n) => n !== 0, "Valor do ajuste não pode ser zero")
+    .refine((n) => n >= -1000 && n <= 1000, "Valor do ajuste fora do limite permitido (-1000 a 1000 Axé)"),
+  reason: z.string().trim().min(3, "Informe um motivo de ajuste com ao menos 3 caracteres").max(250, "Motivo muito longo"),
 });
-
-export const idempotencyKeySchema = z.string().trim().regex(/^[a-zA-Z0-9_\-]{8,128}$/, "Idempotency-Key deve conter entre 8 e 128 caracteres alfanuméricos, hífens ou underscores.");

@@ -6,7 +6,6 @@ import { getApps } from "firebase-admin/app";
 // OBTENÇÃO SEGURA DE IP REAL (SEM CONFIAR CEGAMENTE EM SPOOFING)
 // ======================================================
 export function getClientIp(req: express.Request): string {
-  // Vercel / Cloudflare headers são adicionados pelo edge proxy confiável
   const xRealIp = req.headers["x-real-ip"];
   if (typeof xRealIp === "string" && xRealIp.trim()) {
     return xRealIp.trim();
@@ -19,7 +18,6 @@ export function getClientIp(req: express.Request): string {
 
   const xForwardedFor = req.headers["x-forwarded-for"];
   if (typeof xForwardedFor === "string" && xForwardedFor.trim()) {
-    // Primeiro IP do header é o cliente real na cadeia
     const ips = xForwardedFor.split(",").map((ip) => ip.trim());
     if (ips[0]) return ips[0];
   }
@@ -28,27 +26,59 @@ export function getClientIp(req: express.Request): string {
 }
 
 // ======================================================
-// FIREBASE APP CHECK / ANTIBOT VERIFICATION
+// FIREBASE APP CHECK / ANTIBOT VERIFICATION OFICIAL
 // ======================================================
 export async function verifyAppCheckToken(
   firebaseAdminApp: any,
   token?: string
 ): Promise<{ valid: boolean; decodedToken?: any; error?: string }> {
-  if (!token || typeof token !== "string") {
+  const isProd = process.env.NODE_ENV === "production" || process.env.VERCEL_ENV === "production";
+  const isEnforced = process.env.ENFORCE_APP_CHECK === "true";
+
+  if (!token || typeof token !== "string" || !token.trim()) {
     return { valid: false, error: "Token App Check ausente" };
   }
 
-  if (!firebaseAdminApp || typeof firebaseAdminApp.appCheck !== "function") {
-    // Ambiente sem App Check habilitado (ex: dev local)
-    return { valid: true };
+  const cleanToken = token.trim();
+
+  // Mocks explícitos permitidos estritamente em ambiente de desenvolvimento e teste
+  if (!isProd && cleanToken.startsWith("mock-valid-app-check-token")) {
+    return { valid: true, decodedToken: { appId: "mock-dev-app-id", token: cleanToken } };
   }
 
   try {
-    const appCheckService = firebaseAdminApp.appCheck();
-    const decodedToken = await appCheckService.verifyToken(token);
+    let appCheckService: any = null;
+
+    if (firebaseAdminApp && typeof firebaseAdminApp.appCheck === "function") {
+      appCheckService = firebaseAdminApp.appCheck();
+    } else if (firebaseAdminApp) {
+      try {
+        const { getAppCheck } = await import("firebase-admin/app-check");
+        appCheckService = getAppCheck(firebaseAdminApp);
+      } catch (_importErr) {
+        appCheckService = null;
+      }
+    }
+
+    if (!appCheckService) {
+      // Em produção com proteção habilitada, não há aprovação automática por falta do método
+      if (isProd && isEnforced) {
+        return {
+          valid: false,
+          error: "Serviço App Check indisponível na infraestrutura do Firebase Admin em produção.",
+        };
+      }
+      // Em desenvolvimento e teste sem enforcement, permite avanço informativo
+      if (!isProd && !isEnforced) {
+        return { valid: true, error: "Bypass de App Check em ambiente de desenvolvimento local." };
+      }
+      return { valid: false, error: "App Check não configurado adequadamente." };
+    }
+
+    const decodedToken = await appCheckService.verifyToken(cleanToken);
     return { valid: true, decodedToken };
   } catch (err: any) {
-    return { valid: false, error: err.message || "Token App Check inválido" };
+    return { valid: false, error: err.message || "Token App Check inválido ou expirado." };
   }
 }
 
@@ -56,10 +86,14 @@ export function createAppCheckMiddleware(getFirebaseApp?: any) {
   const isEnforced = () => process.env.ENFORCE_APP_CHECK === "true";
 
   return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    // Isenção explícita para health check e webhook oficial do Mercado Pago
+    // Isenções estritas e específicas:
+    // 1. Health check público da infraestrutura
+    // 2. Webhook do Mercado Pago (protegido por assinatura HMAC-SHA256 oficial)
+    // 3. Endpoint do agendador Vercel Cron (protegido exclusivamente por CRON_SECRET Bearer token)
     if (
       req.path === "/api/health" ||
-      req.path.startsWith("/api/mercadopago/webhook")
+      req.path.startsWith("/api/mercadopago/webhook") ||
+      req.path === "/api/cron/reconcile"
     ) {
       return next();
     }
@@ -79,7 +113,7 @@ export function createAppCheckMiddleware(getFirebaseApp?: any) {
           code: "APP_CHECK_FAILED",
         });
       }
-      // Modo de rollout / observação: loga sem bloquear
+      // Modo de rollout / observação: loga sem bloquear em dev/test
       console.warn(`[APP-CHECK OBSERVE] ${req.method} ${req.path} - ${result.error}`);
     }
 
@@ -88,7 +122,7 @@ export function createAppCheckMiddleware(getFirebaseApp?: any) {
 }
 
 // ======================================================
-// AUDIT LOGGING MINIMIZADO
+// AUDIT LOGGING MINIMIZADO (PROTEÇÃO CONTRA REJEIÇÃO POR UNDEFINED)
 // ======================================================
 export async function recordSecurityAudit(
   firestore: any,
@@ -105,17 +139,21 @@ export async function recordSecurityAudit(
   try {
     const hashedIp = data.ip
       ? crypto.createHash("sha256").update(data.ip).digest("hex").substring(0, 16)
-      : undefined;
+      : null;
 
-    await firestore.collection("security_logs").add({
-      type: data.type,
+    // Constrói objeto livre de propriedades undefined para evitar rejeição do Firestore
+    const auditDoc: Record<string, any> = {
+      type: data.type || "security_event",
       userId: data.userId || "anonymous",
-      email: data.email,
-      ipHash: hashedIp,
-      details: data.details,
       status: data.status || "success",
       timestamp: new Date().toISOString(),
-    });
+    };
+
+    if (data.email) auditDoc.email = String(data.email).trim().toLowerCase();
+    if (hashedIp) auditDoc.ipHash = hashedIp;
+    if (data.details) auditDoc.details = String(data.details).substring(0, 500);
+
+    await firestore.collection("security_logs").add(auditDoc);
   } catch (err) {
     console.error("[SECURITY] Falha ao registrar security log:", err);
   }

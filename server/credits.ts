@@ -47,6 +47,7 @@ export interface IdempotencyRecord {
   xpAwarded: number;
   persistedResponse?: any;
   refundOperationId?: string;
+  adminRefunded?: boolean;
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -134,21 +135,42 @@ export async function checkAtomicDurableRateLimit(
 }
 
 // ======================================================
-// UTILITÁRIOS DE IDENTIFICAÇÃO E IDEMPOTÊNCIA
+// VALIDAÇÃO E UTILITÁRIOS UNIFICADOS DE IDEMPOTÊNCIA
 // ======================================================
+export function validateIdempotencyKey(key?: unknown): { valid: boolean; error?: string; cleanKey?: string } {
+  if (!key || typeof key !== "string") {
+    return { valid: false, error: "Chave de idempotência ausente ou inválida." };
+  }
+  const clean = key.trim();
+  if (clean.length < 8) {
+    return { valid: false, error: "Chave de idempotência muito curta (mínimo 8 caracteres)." };
+  }
+  if (clean.length > 128) {
+    return { valid: false, error: "Chave de idempotência excede o tamanho máximo (128 caracteres)." };
+  }
+  if (!/^[a-zA-Z0-9_\-]+$/.test(clean)) {
+    return { valid: false, error: "Chave de idempotência deve conter apenas caracteres alfanuméricos, hífen ou sublinhado." };
+  }
+  return { valid: true, cleanKey: clean };
+}
+
 export function buildScopedIdempotencyDocId(
   userId: string,
   source: string,
   idempotencyKey: string
 ): string {
-  const sanitizedKey = (idempotencyKey || "")
-    .trim()
-    .replace(/[^a-zA-Z0-9_\-]/g, "")
-    .substring(0, 128);
-  const keyHash = crypto.createHash("sha256").update(sanitizedKey).digest("hex").substring(0, 32);
-  const userClean = (userId || "anon").trim().replace(/[^a-zA-Z0-9_\-]/g, "").substring(0, 48);
-  const sourceClean = (source || "unknown").trim().replace(/[^a-zA-Z0-9_\-]/g, "").substring(0, 24);
-  return `idem_${userClean}_${sourceClean}_${keyHash}`;
+  const cleanUser = String(userId || "").trim();
+  const cleanSource = String(source || "").trim();
+  const cleanKey = String(idempotencyKey || "").trim();
+
+  if (!cleanUser || !cleanSource || !cleanKey) {
+    throw new Error("Parâmetros insuficientes para geração do escopo de idempotência.");
+  }
+
+  // Representação canônica inequívoca do escopo completo (sem truncamentos com risco de colisão)
+  const canonicalScope = `u:${cleanUser}|s:${cleanSource}|k:${cleanKey}`;
+  const scopeHash = crypto.createHash("sha256").update(canonicalScope).digest("hex");
+  return `idem_${scopeHash}`;
 }
 
 export function computeRequestFingerprint(payload: any): string {
@@ -177,7 +199,7 @@ export interface DebitParams {
   xpAwarded: number;
   source: CreditLedgerRecord["source"];
   consultationId?: string;
-  idempotencyKey?: string;
+  idempotencyKey: string;
   requestHash?: string;
   requestPayloadSummary?: string;
 }
@@ -198,30 +220,45 @@ export async function executeCreditDebitTransactional(
   firestore: any,
   params: DebitParams
 ): Promise<DebitResult> {
-  const now = new Date().toISOString();
-  const rawKey = params.idempotencyKey?.trim() || "";
-  const sanitizedKey = rawKey ? rawKey.replace(/[^a-zA-Z0-9_\-]/g, "").substring(0, 128) : "";
+  const keyValidation = validateIdempotencyKey(params.idempotencyKey);
+  if (!keyValidation.valid || !keyValidation.cleanKey) {
+    const err: any = new Error(keyValidation.error || "Chave de idempotência inválida.");
+    err.status = 400;
+    err.code = "INVALID_IDEMPOTENCY_KEY";
+    throw err;
+  }
+  const sanitizedKey = keyValidation.cleanKey;
 
-  // Identificador isolado por usuário e modalidade de consulta
+  // Validação estrita de valores numéricos inteiros finitos
+  if (!Number.isInteger(params.cost) || params.cost <= 0) {
+    const err: any = new Error(`Valor de custo inválido (${params.cost}). Deve ser um número inteiro positivo.`);
+    err.status = 400;
+    throw err;
+  }
+  if (!Number.isInteger(params.xpAwarded) || params.xpAwarded < 0) {
+    const err: any = new Error(`Valor de XP inválido (${params.xpAwarded}). Deve ser um número inteiro não negativo.`);
+    err.status = 400;
+    throw err;
+  }
+
   const targetUserId = params.userRef?.id || "";
-  const scopedKeyDocId = sanitizedKey && targetUserId
-    ? buildScopedIdempotencyDocId(targetUserId, params.source, sanitizedKey)
-    : "";
-  const keyDocRef = scopedKeyDocId && firestore
-    ? firestore.collection("idempotency_keys").doc(scopedKeyDocId)
-    : null;
+  if (!targetUserId) {
+    const err: any = new Error("Referência de usuário inválida para débito.");
+    err.status = 400;
+    throw err;
+  }
+
+  const scopedKeyDocId = buildScopedIdempotencyDocId(targetUserId, params.source, sanitizedKey);
+  const keyDocRef = firestore.collection("idempotency_keys").doc(scopedKeyDocId);
+  const now = new Date().toISOString();
 
   return firestore.runTransaction(async (transaction: any) => {
     // ==========================================
     // FASE 1: TODAS AS LEITURAS PRIMEIRO (STRICT READS)
     // ==========================================
-
-    let keySnap: any = null;
-    if (keyDocRef) {
-      keySnap = await transaction.get(keyDocRef);
-    }
-
+    const keySnap = await transaction.get(keyDocRef);
     const userDoc = await transaction.get(params.userRef);
+
     if (!userDoc.exists) {
       const err: any = new Error("Usuário não encontrado.");
       err.status = 404;
@@ -232,6 +269,13 @@ export async function executeCreditDebitTransactional(
     // VALIDAÇÃO DAS LEITURAS (SEM NENHUM WRITE AINDA)
     // ==========================================
     const userData = userDoc.data() || {};
+    if (userData.isBlocked) {
+      const err: any = new Error("Este perfil foi suspenso por medidas de segurança do terreiro.");
+      err.status = 403;
+      err.code = "ACCOUNT_BLOCKED";
+      throw err;
+    }
+
     const currentCredits = Number(userData.credits || 0);
     const currentXp = Number(userData.xp || 0);
 
@@ -254,7 +298,7 @@ export async function executeCreditDebitTransactional(
         throw err;
       }
 
-      // 3. Validação de conteúdo da requisição: reutilizar a mesma chave com outra pergunta gera conflito
+      // 3. Validação de integridade do conteúdo da requisição
       if (params.requestHash && keyData.requestHash && keyData.requestHash !== params.requestHash) {
         const err: any = new Error(
           "Chave de idempotência reutilizada com pergunta ou parâmetros diferentes da consulta original."
@@ -292,7 +336,8 @@ export async function executeCreditDebitTransactional(
       // 6. Se está em processamento concorrente:
       if (keyData.status === "processing") {
         const createdAtMs = new Date(keyData.createdAt || 0).getTime();
-        const isStale = Date.now() - createdAtMs > 60_000; // 60 segundos de timeout
+        // Tempo compatível com o ciclo real da consulta (90 segundos de timeout)
+        const isStale = Date.now() - createdAtMs >= 90_000;
         if (!isStale) {
           const err: any = new Error(
             "Uma consulta idêntica já está em processamento no terreiro. Aguarde a conclusão."
@@ -301,7 +346,7 @@ export async function executeCreditDebitTransactional(
           err.code = "OPERATION_IN_PROGRESS";
           throw err;
         }
-        // Se a operação ficou presa (> 60s), sinaliza para recuperação
+        // Se a operação ficou presa (>= 90s), sinaliza para recuperação
         const err: any = new Error(
           "Operação anterior foi interrompida antes da conclusão. Aguarde o estorno automático ou tente com nova consulta."
         );
@@ -343,7 +388,7 @@ export async function executeCreditDebitTransactional(
     const ledgerRef = firestore.collection("credit_ledger").doc(operationId);
     transaction.set(ledgerRef, {
       operationId,
-      idempotencyKey: sanitizedKey || operationId,
+      idempotencyKey: sanitizedKey,
       userId: userDoc.id,
       firebaseUid: userData.firebaseUid || "",
       type: "debit",
@@ -363,27 +408,25 @@ export async function executeCreditDebitTransactional(
     });
 
     // 3. Grava chave de idempotência com status "processing"
-    if (keyDocRef) {
-      transaction.set(keyDocRef, {
-        idempotencyKey: sanitizedKey,
-        scopedDocId: scopedKeyDocId,
-        userId: userDoc.id,
-        source: params.source,
-        requestHash: params.requestHash || "",
-        requestPayloadSummary: params.requestPayloadSummary || "",
-        operationId,
-        consultationId: params.consultationId || "",
-        cost: params.cost,
-        balanceBefore: currentCredits,
-        balanceAfter,
-        newXp,
-        newLevel,
-        xpAwarded: params.xpAwarded,
-        status: "processing",
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
+    transaction.set(keyDocRef, {
+      idempotencyKey: sanitizedKey,
+      scopedDocId: scopedKeyDocId,
+      userId: userDoc.id,
+      source: params.source,
+      requestHash: params.requestHash || "",
+      requestPayloadSummary: params.requestPayloadSummary || "",
+      operationId,
+      consultationId: params.consultationId || "",
+      cost: params.cost,
+      balanceBefore: currentCredits,
+      balanceAfter,
+      newXp,
+      newLevel,
+      xpAwarded: params.xpAwarded,
+      status: "processing",
+      createdAt: now,
+      updatedAt: now,
+    });
 
     return {
       isAlreadyCommitted: false,
@@ -399,21 +442,34 @@ export async function executeCreditDebitTransactional(
 }
 
 // ======================================================
-// PERSISTÊNCIA DA RESPOSTA COMPLETA DA CONSULTA
+// PERSISTÊNCIA OBRIGATÓRIA DA RESPOSTA COMPLETA DA CONSULTA
 // ======================================================
 export async function completeConsultationTransactional(
   firestore: any,
   params: {
     userId: string;
     source: CreditLedgerRecord["source"];
-    idempotencyKey?: string;
+    idempotencyKey: string;
     operationId: string;
     responsePayload: any;
   }
 ): Promise<void> {
-  if (!params.idempotencyKey || !firestore) return;
+  const keyValidation = validateIdempotencyKey(params.idempotencyKey);
+  if (!keyValidation.valid || !keyValidation.cleanKey) {
+    const err: any = new Error("Chave de idempotência inválida para conclusão da consulta.");
+    err.status = 400;
+    throw err;
+  }
+  const cleanKey = keyValidation.cleanKey;
+
+  if (!params.operationId || typeof params.operationId !== "string") {
+    const err: any = new Error("Identificador da operação original é obrigatório para conclusão.");
+    err.status = 400;
+    throw err;
+  }
+
   const now = new Date().toISOString();
-  const scopedId = buildScopedIdempotencyDocId(params.userId, params.source, params.idempotencyKey);
+  const scopedId = buildScopedIdempotencyDocId(params.userId, params.source, cleanKey);
   const keyDocRef = firestore.collection("idempotency_keys").doc(scopedId);
   const ledgerDocRef = firestore.collection("credit_ledger").doc(params.operationId);
 
@@ -434,6 +490,14 @@ export async function completeConsultationTransactional(
     }
 
     const keyData = keySnap.data() || {};
+
+    // Valida correspondência de usuário
+    if (keyData.userId && keyData.userId !== params.userId) {
+      const err: any = new Error("Chave de idempotência vinculada a outro usuário.");
+      err.status = 403;
+      err.code = "USER_MISMATCH";
+      throw err;
+    }
 
     // Valida correspondência exata de operationId para impedir que processos atrasados interfiram
     if (keyData.operationId && keyData.operationId !== params.operationId) {
@@ -498,6 +562,7 @@ export async function executeCreditRefundTransactional(
     source: CreditLedgerRecord["source"];
     reason: string;
     idempotencyKey?: string;
+    isAdministrative?: boolean;
   }
 ): Promise<RefundResult> {
   if (!params.originalOperationId || typeof params.originalOperationId !== "string") {
@@ -541,13 +606,16 @@ export async function executeCreditRefundTransactional(
     let keySnap: any = null;
     const effectiveIdempotencyKey = origData.idempotencyKey || params.idempotencyKey;
     if (effectiveIdempotencyKey) {
-      const scopedId = buildScopedIdempotencyDocId(
-        userDoc.id,
-        origData.source || params.source,
-        effectiveIdempotencyKey
-      );
-      keyDocRef = firestore.collection("idempotency_keys").doc(scopedId);
-      keySnap = await transaction.get(keyDocRef);
+      const keyValidation = validateIdempotencyKey(effectiveIdempotencyKey);
+      if (keyValidation.valid && keyValidation.cleanKey) {
+        const scopedId = buildScopedIdempotencyDocId(
+          userDoc.id,
+          origData.source || params.source,
+          keyValidation.cleanKey
+        );
+        keyDocRef = firestore.collection("idempotency_keys").doc(scopedId);
+        keySnap = await transaction.get(keyDocRef);
+      }
     }
 
     // ==========================================
@@ -574,8 +642,8 @@ export async function executeCreditRefundTransactional(
 
     // Validação 3: Derivar valor do estorno do débito original e rejeitar divergências
     const originalDebitAmount = Number(origData.amount || 0);
-    if (originalDebitAmount <= 0) {
-      const err: any = new Error("Valor do débito original é inválido (zero ou negativo).");
+    if (!Number.isInteger(originalDebitAmount) || originalDebitAmount <= 0) {
+      const err: any = new Error("Valor do débito original é inválido.");
       err.status = 400;
       throw err;
     }
@@ -606,6 +674,21 @@ export async function executeCreditRefundTransactional(
         newLevel: userData.level || "Buscador",
         alreadyRefunded: true,
         refundedAmount: originalDebitAmount,
+      };
+    }
+
+    // Validação 5: Se a consulta já estiver concluída e NÃO for estorno administrativo explícito
+    if (origData.status === "completed" && !params.isAdministrative) {
+      console.warn(
+        `[REFUND] Operação ${params.originalOperationId} já foi concluída com sucesso. Recuperação de falha não deve estornar consultas concluídas.`
+      );
+      return {
+        operationId: params.originalOperationId,
+        balanceAfter: Number(userData.credits || 0),
+        newXp: Number(userData.xp || 0),
+        newLevel: userData.level || "Buscador",
+        alreadyRefunded: true,
+        refundedAmount: 0,
       };
     }
 
@@ -657,6 +740,7 @@ export async function executeCreditRefundTransactional(
       reason: params.reason,
       createdAt: now,
       committedAt: now,
+      isAdministrative: Boolean(params.isAdministrative),
     });
 
     // 4. Atualiza registro de idempotência para status 'refunded'
@@ -666,6 +750,7 @@ export async function executeCreditRefundTransactional(
         refundOperationId: refundOpId,
         refundedAt: now,
         updatedAt: now,
+        adminRefunded: Boolean(params.isAdministrative),
       });
     }
 
@@ -698,7 +783,8 @@ export async function recoverStaleOperationTransactional(
   refundOperationId?: string;
   refundedAmount?: number;
 }> {
-  const timeoutMs = params.staleTimeoutMs ?? 60_000;
+  // O tempo mínimo real para abandono deve ser de ao menos 60 segundos (padrão 90s)
+  const timeoutMs = Math.max(60_000, Number(params.staleTimeoutMs || 90_000));
   const now = new Date().toISOString();
   const nowMs = Date.now();
   const keyDocRef = firestore.collection("idempotency_keys").doc(params.keyDocId);
@@ -746,7 +832,6 @@ export async function recoverStaleOperationTransactional(
 
     const origData = origSnap.data() || {};
     if (origData.status === "refunded" || origData.status === "reversed") {
-      // Sincroniza a chave com o ledger já estornado
       transaction.update(keyDocRef, {
         status: "refunded",
         updatedAt: now,
@@ -819,7 +904,7 @@ export async function recoverStaleOperationTransactional(
 }
 
 // ======================================================
-// ESTRATÉGIA DE RECUPERAÇÃO E RECONCILIAÇÃO EXPLÍCITA
+// ESTRATÉGIA DE RECUPERAÇÃO E RECONCILIAÇÃO COM PAGINAÇÃO
 // ======================================================
 export interface ReconcileOptions {
   limit?: number;
@@ -828,6 +913,7 @@ export interface ReconcileOptions {
 }
 
 export interface ReconcileResult {
+  success: boolean;
   staleCount: number;
   refundedCount: number;
   skippedCompletedCount: number;
@@ -842,9 +928,10 @@ export async function reconcilePendingOperations(
   options?: ReconcileOptions
 ): Promise<ReconcileResult> {
   const batchLimit = Math.min(Math.max(1, Number(options?.limit || 25)), 100);
-  const staleTimeoutMs = Math.max(5_000, Number(options?.staleTimeoutMs || 60_000));
+  const staleTimeoutMs = Math.max(60_000, Number(options?.staleTimeoutMs || 90_000));
 
   const result: ReconcileResult = {
+    success: true,
     staleCount: 0,
     refundedCount: 0,
     skippedCompletedCount: 0,
@@ -853,27 +940,41 @@ export async function reconcilePendingOperations(
     hasMore: false,
   };
 
-  if (!firestore) return result;
+  if (!firestore) {
+    result.success = false;
+    result.errors.push("Instância do Firestore indisponível para reconciliação.");
+    return result;
+  }
 
   const nowMs = Date.now();
   const staleThresholdIso = new Date(nowMs - staleTimeoutMs).toISOString();
 
   // 1. Processa fila de reconciliações pendentes
   try {
-    let recQuery = firestore
+    const recSnap = await firestore
       .collection("reconciliations")
       .where("status", "==", "reconciliation_required")
-      .limit(batchLimit);
-
-    const recSnap = await recQuery.get();
+      .limit(batchLimit)
+      .get();
 
     for (const doc of recSnap.docs) {
-      const recData = doc.data();
+      const recData = doc.data() || {};
+      if (!recData.userId || !recData.operationId) {
+        // Registro inválido: marca para não bloquear a fila
+        await doc.ref.update({
+          status: "invalid_unrecoverable",
+          updatedAt: new Date().toISOString(),
+          error: "Campos obrigatórios ausentes (userId ou operationId)",
+        });
+        result.errors.push(`Reconciliação ${doc.id} marcada como inválida: dados incompletos.`);
+        continue;
+      }
+
       try {
         const userRef = firestore.collection("users").doc(recData.userId);
         const refundRes = await executeCreditRefundTransactional(firestore, {
           userRef,
-          amount: recData.creditsCost || recData.amount,
+          amount: recData.amount || recData.creditsCost,
           originalOperationId: recData.operationId,
           source: recData.source || "chat",
           reason: `Reconciliação automática: ${recData.error || "falha recuperada"}`,
@@ -897,15 +998,28 @@ export async function reconcilePendingOperations(
       }
     }
   } catch (err: any) {
-    console.warn("[RECONCILE] Erro ao buscar reconciliações pendentes:", err);
+    console.error("[RECONCILE] Falha de banco na fila de reconciliação:", err);
+    result.success = false;
+    result.errors.push(`Consulta a reconciliations falhou: ${err.message}`);
   }
 
-  // 2. Processa operações interrompidas em status 'processing' no idempotency_keys
+  // 2. Processa operações interrompidas com ordenação estável e paginação
   try {
     let staleQuery = firestore
       .collection("idempotency_keys")
       .where("status", "==", "processing")
+      .orderBy("createdAt", "asc")
       .limit(batchLimit);
+
+    if (options?.startAfterDocId) {
+      const cursorSnap = await firestore
+        .collection("idempotency_keys")
+        .doc(options.startAfterDocId)
+        .get();
+      if (cursorSnap.exists && typeof staleQuery.startAfter === "function") {
+        staleQuery = staleQuery.startAfter(cursorSnap);
+      }
+    }
 
     const staleSnap = await staleQuery.get();
     if (staleSnap.docs.length >= batchLimit) {
@@ -914,36 +1028,46 @@ export async function reconcilePendingOperations(
 
     for (const doc of staleSnap.docs) {
       result.lastProcessedDocId = doc.id;
-      const keyData = doc.data();
+      const keyData = doc.data() || {};
       const createdAt = keyData.createdAt || "";
+
+      // Trata registros inválidos para não bloquear a esteira
+      if (!keyData.operationId || !keyData.userId) {
+        await doc.ref.update({
+          status: "failed",
+          updatedAt: new Date().toISOString(),
+          error: "Registro de idempotência inválido sem userId ou operationId.",
+        });
+        result.errors.push(`Chave ${doc.id} marcada como inválida por dados corrompidos.`);
+        continue;
+      }
 
       if (createdAt && createdAt < staleThresholdIso) {
         result.staleCount++;
-        if (keyData.operationId && keyData.userId) {
-          try {
-            const recovery = await recoverStaleOperationTransactional(firestore, {
-              keyDocId: doc.id,
-              expectedOperationId: keyData.operationId,
-              expectedUserId: keyData.userId,
-              staleTimeoutMs,
-              reason: "Estorno atômico de consulta stale/interrompida",
-            });
+        try {
+          const recovery = await recoverStaleOperationTransactional(firestore, {
+            keyDocId: doc.id,
+            expectedOperationId: keyData.operationId,
+            expectedUserId: keyData.userId,
+            staleTimeoutMs,
+            reason: "Estorno atômico de consulta stale/interrompida",
+          });
 
-            if (recovery.resolved) {
-              result.refundedCount++;
-            } else if (recovery.reason === "already_completed") {
-              // A consulta terminou e foi salva no intervalo! Não deve ser estornada.
-              result.skippedCompletedCount++;
-            }
-          } catch (refundErr: any) {
-            console.error(`[RECONCILE] Falha no auto-estorno atômico ${doc.id}:`, refundErr);
-            result.errors.push(`Stale op ${doc.id}: ${refundErr.message}`);
+          if (recovery.resolved) {
+            result.refundedCount++;
+          } else if (recovery.reason === "already_completed") {
+            result.skippedCompletedCount++;
           }
+        } catch (refundErr: any) {
+          console.error(`[RECONCILE] Falha no auto-estorno atômico ${doc.id}:`, refundErr);
+          result.errors.push(`Stale op ${doc.id}: ${refundErr.message}`);
         }
       }
     }
   } catch (err: any) {
-    console.warn("[RECONCILE] Erro ao buscar operações stale:", err);
+    console.error("[RECONCILE] Falha de banco nas operações stale:", err);
+    result.success = false;
+    result.errors.push(`Consulta a idempotency_keys falhou: ${err.message}`);
   }
 
   return result;
