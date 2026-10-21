@@ -201,7 +201,7 @@ test("Emulator - Processo atrasado: execução antiga após estorno é recusada 
     });
   } catch (err) {
     threwCompletion = true;
-    assert.match(err.message, /já foi estornada/i);
+    assert.match(err.message, /já foi estornad[ao]/i);
     assert.equal(err.code, "OPERATION_ALREADY_REFUNDED");
   }
   assert.equal(threwCompletion, true, "Processo atrasado deve ser explicitamente recusado");

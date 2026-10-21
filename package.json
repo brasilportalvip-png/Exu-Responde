@@ -44,6 +44,7 @@
     "@types/nodemailer": "^8.0.2",
     "autoprefixer": "^10.5.4",
     "esbuild": "^0.25.0",
+    "firebase-tools": "^15.34.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.23.12",
     "typescript": "~5.8.2",

@@ -4156,407 +4156,234 @@ REGRAS RÍGIDAS DE INTERPRETAÇÃO:
 
 
 
-// Credits shop plans buy handler - Mercado Pago
-app.post(
-  "/api/credits/buy",
-  requireFirebaseAuth,
-  requirePortalUser,
-  async (req, res) => {
-    const portalUser = (req as any).portalUser;
+// Pagamentos: valores monetários comparados em centavos, sem tolerância de R$ 0,01.
+function paymentCents(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error("PAYMENT_INVALID_AMOUNT");
+  const cents = Math.round(value * 100);
+  if (!Number.isSafeInteger(cents) || Math.abs(value * 100 - cents) > 0.000001) throw new Error("PAYMENT_INVALID_AMOUNT");
+  return cents;
+}
+function paymentDocId(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(value)) throw new Error("PAYMENT_INVALID_REFERENCE");
+  return value;
+}
+function paymentInteger(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("PAYMENT_INVALID_BALANCE");
+  return value;
+}
 
-    if (!await checkDurableRateLimit(`buy_${portalUser.id}`, 10, 60 * 1000)) {
-      return res.status(429).json({ error: "Muitas solicitações de compra em sequência. Aguarde alguns instantes." });
-    }
-
-    const userId = portalUser.id;
-    const { planId } = req.body;
-
-  const plans: Record<string, any> = {
-  prata: {
-    title: "Plano Prata",
-    price: 49.0,
-    credits: 50
-  },
-  ouro: {
-    title: "Plano Ouro",
-    price: 120.0,
-    credits: 125
-  }
-};
-
-  const normalizedPlanId =
-  planId === "plan_prata" ? "prata" :
-  planId === "plan_ouro" ? "ouro" :
-  planId;
-
-const selected = plans[normalizedPlanId];
-
+// Preço e créditos vêm exclusivamente do catálogo do servidor.
+app.post("/api/credits/buy", requireFirebaseAuth, requirePortalUser, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const portalUser = (req as any).portalUser;
+  const rawPlan = req.body?.planId;
+  const planId = rawPlan === "prata" ? "plan_prata" : rawPlan === "ouro" ? "plan_ouro" : rawPlan;
+  const selected = typeof planId === "string" ? getPlanById(planId) : undefined;
   if (!selected) return res.status(400).json({ error: "Plano inválido." });
-
   try {
-    const orderId = "ord_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now();
-    await firestore.collection("orders").doc(orderId).set({
-      orderId,
-      userId: String(userId),
-      planId: normalizedPlanId,
-      credits: selected.credits,
-      price: selected.price,
-      status: "pending",
-      createdAt: new Date().toISOString()
+    if (!await checkDurableRateLimit(`buy_${portalUser.id}`, 10, 60 * 1000)) {
+      return res.status(429).json({ error: "Muitas solicitações de compra. Aguarde um instante." });
+    }
+    if (!process.env.MERCADO_PAGO_ACCESS_TOKEN?.trim()) throw new Error("PAYMENT_NOT_CONFIGURED");
+    const appUrl = new URL(process.env.APP_URL || "");
+    if (appUrl.protocol !== "https:" || appUrl.username || appUrl.password || appUrl.search || appUrl.hash || appUrl.pathname !== "/") {
+      throw new Error("PAYMENT_INVALID_APP_URL");
+    }
+    const amountCents = paymentCents(selected.price);
+    const credits = paymentInteger(selected.credits);
+    if (credits === 0) throw new Error("PAYMENT_INVALID_PLAN");
+    const normalizedPlanId = selected.id.replace(/^plan_/, "");
+    const orderId = "ord_" + crypto.randomUUID();
+    const orderRef = firestore.collection("orders").doc(orderId);
+    await orderRef.set({
+      orderId, userId: portalUser.id, planId: normalizedPlanId, credits,
+      price: selected.price, amountCents, currency: "BRL", status: "pending",
+      createdAt: new Date().toISOString(),
     });
+    const preference = await new Preference(mp).create({ body: {
+      external_reference: orderId,
+      items: [{ id: selected.id, title: selected.name, quantity: 1, unit_price: selected.price, currency_id: "BRL" }],
+      metadata: { userId: portalUser.id, planId: normalizedPlanId, credits, orderId },
+      back_urls: {
+        success: `${appUrl.origin}/?payment=success`,
+        failure: `${appUrl.origin}/?payment=failure`,
+        pending: `${appUrl.origin}/?payment=pending`,
+      },
+      notification_url: `${appUrl.origin}/api/mercadopago/webhook`,
+      payment_methods: { excluded_payment_types: [{ id: "credit_card" }, { id: "debit_card" }, { id: "ticket" }], installments: 1 },
+    } });
+    if (!preference.id || !preference.init_point) throw new Error("PAYMENT_CHECKOUT_UNAVAILABLE");
+    const checkout = new URL(preference.init_point);
+    if (checkout.protocol !== "https:") throw new Error("PAYMENT_CHECKOUT_INVALID");
+    // Não altera o estado do pedido: o pagamento pode ter sido confirmado em paralelo.
+    await orderRef.update({ preferenceId: preference.id, updatedAt: new Date().toISOString() });
+    return res.json({ success: true, orderId, checkoutUrl: preference.init_point, preferenceId: preference.id });
+  } catch (error) {
+    console.error("[MP CHECKOUT] Falha ao criar pedido:", error);
+    return res.status(503).json({ error: "Não foi possível iniciar o pagamento. Tente novamente em instantes." });
+  }
+});
 
-    const preference = new Preference(mp);
+function validatePaymentNotification(req: any, secret: string): string | null {
+  // A assinatura oficial utiliza data.id da URL, não o id do evento no corpo.
+  const dataId = req.query?.["data.id"];
+  const signature = req.headers["x-signature"];
+  const requestId = req.headers["x-request-id"];
+  if (typeof dataId !== "string" || !/^[0-9]{1,30}$/.test(dataId) ||
+      typeof signature !== "string" || typeof requestId !== "string" || !requestId || requestId.length > 200) return null;
+  const pairs = signature.split(",").map((part: string) => part.trim().split("="));
+  const timestamps = pairs.filter((pair: string[]) => pair[0] === "ts");
+  const hashes = pairs.filter((pair: string[]) => pair[0] === "v1");
+  if (timestamps.length !== 1 || hashes.length !== 1 || timestamps[0].length !== 2 || hashes[0].length !== 2) return null;
+  const ts = timestamps[0][1];
+  const hash = hashes[0][1];
+  if (!/^\d{10,16}$/.test(ts) || !/^[a-fA-F0-9]{64}$/.test(hash)) return null;
+  // Mantém ts exatamente como recebido (segundos ou milissegundos).
+  // Reenvios legítimos são protegidos contra duplicação pela transação abaixo.
+  const manifest = `id:${dataId};request-id:${requestId};ts:${ts};`;
+  const expected = crypto.createHmac("sha256", secret).update(manifest).digest();
+  if (!crypto.timingSafeEqual(expected, Buffer.from(hash, "hex"))) return null;
+  const bodyId = req.body?.data?.id;
+  if (bodyId !== undefined && String(bodyId) !== dataId) return null;
+  return dataId;
+}
 
-    const result = await preference.create({
-      body: {
-        external_reference: orderId,
-        items: [
-          {
-            id: planId,
-            title: selected.title,
-            quantity: 1,
-            unit_price: selected.price,
-            currency_id: "BRL"
-          }
-        ],
-        metadata: {
-          userId: String(userId),
-          planId: normalizedPlanId,
-          credits: selected.credits,
-          orderId
-        },
-        back_urls: {
-          success: `${process.env.APP_URL}/?payment=success`,
-          failure: `${process.env.APP_URL}/?payment=failure`,
-          pending: `${process.env.APP_URL}/?payment=pending`
-        },
-        notification_url: `${process.env.APP_URL}/api/mercadopago/webhook`,
-        payment_methods: {
-          excluded_payment_types: [
-            { id: "credit_card" },
-            { id: "debit_card" },
-            { id: "ticket" }
-          ],
-          installments: 1
-        }
+async function commitApprovedPurchase(paymentId: string, info: any) {
+  const orderId = paymentDocId(info.external_reference);
+  const paidCents = paymentCents(info.transaction_amount);
+  if (info.currency_id !== "BRL") throw new Error("PAYMENT_CURRENCY_MISMATCH");
+  const orderRef = firestore.collection("orders").doc(orderId);
+  const paymentRef = firestore.collection("payments").doc(paymentId);
+  const ledgerId = `mp_pay_${paymentId}`;
+  const ledgerRef = firestore.collection("credit_ledger").doc(ledgerId);
+  return firestore.runTransaction(async (transaction: any) => {
+    // Todas as leituras precedem qualquer escrita. Não mantém flags externas à transação.
+    const [orderSnap, paymentSnap, ledgerSnap] = await Promise.all([
+      transaction.get(orderRef), transaction.get(paymentRef), transaction.get(ledgerRef),
+    ]);
+    if (!orderSnap.exists) throw new Error("PAYMENT_ORDER_NOT_FOUND");
+    const order = orderSnap.data() || {};
+    const userId = paymentDocId(order.userId);
+    const userRef = firestore.collection("users").doc(userId);
+    const userSnap = await transaction.get(userRef);
+    if (order.orderId !== orderId) throw new Error("PAYMENT_ORDER_MISMATCH");
+    const expectedCents = paymentCents(order.price);
+    if (expectedCents !== paidCents || (order.amountCents !== undefined && order.amountCents !== expectedCents)) throw new Error("PAYMENT_AMOUNT_MISMATCH");
+    if (order.currency !== undefined && order.currency !== "BRL") throw new Error("PAYMENT_CURRENCY_MISMATCH");
+    const credits = paymentInteger(order.credits);
+    if (credits === 0 || typeof order.planId !== "string" || !order.planId) throw new Error("PAYMENT_INVALID_ORDER");
+    const metadata = info.metadata || {};
+    const claimedUser = metadata.userId ?? metadata.user_id;
+    const claimedPlan = metadata.planId ?? metadata.plan_id;
+    const claimedOrder = metadata.orderId ?? metadata.order_id;
+    if (claimedUser !== undefined && String(claimedUser) !== userId) throw new Error("PAYMENT_USER_MISMATCH");
+    if (claimedPlan !== undefined && claimedPlan !== order.planId) throw new Error("PAYMENT_PLAN_MISMATCH");
+    if (claimedOrder !== undefined && claimedOrder !== orderId) throw new Error("PAYMENT_ORDER_MISMATCH");
+    const recorded = paymentSnap.exists ? paymentSnap.data() || {} : {};
+    const ledger = ledgerSnap.exists ? ledgerSnap.data() || {} : {};
+    const orderDone = ["completed", "approved"].includes(order.status);
+    const previouslyCredited = recorded.status === "credited" || ledgerSnap.exists || orderDone;
+    if (previouslyCredited) {
+      if (recorded.status !== "credited" || !ledgerSnap.exists || !orderDone || order.paymentId !== paymentId ||
+          recorded.orderId !== orderId || recorded.userId !== userId || recorded.credits !== credits ||
+          ledger.paymentId !== paymentId || ledger.orderId !== orderId || ledger.userId !== userId ||
+          ledger.type !== "purchase" || ledger.source !== "mercadopago" || ledger.amount !== credits) {
+        throw new Error("PAYMENT_ALREADY_SETTLED_OR_INCONSISTENT");
       }
+      // Uma conta removida após a compra não invalida o comprovante de crédito já entregue.
+      return { alreadyProcessed: true, orderId, userId, credits, planId: order.planId, userData: null, balanceAfter: 0 };
+    }
+    if (recorded.orderId && recorded.orderId !== orderId) throw new Error("PAYMENT_REFERENCE_CONFLICT");
+    if (!userSnap.exists) throw new Error("PAYMENT_USER_NOT_FOUND");
+    if (order.status !== "pending") throw new Error("PAYMENT_ORDER_STATE_INVALID");
+    const userData = userSnap.data() || {};
+    const balanceBefore = paymentInteger(userData.credits ?? 0);
+    const xpBefore = paymentInteger(userData.xp ?? 0);
+    const balanceAfter = paymentInteger(balanceBefore + credits);
+    const xpAwarded = paymentInteger(Math.round(paidCents / 20));
+    const newXp = paymentInteger(xpBefore + xpAwarded);
+    const { level } = checkXpLevel(newXp);
+    const now = new Date().toISOString();
+    transaction.update(userRef, {
+      credits: balanceAfter, xp: newXp, level,
+      lastPaymentId: paymentId, lastPlanId: order.planId, lastCreditsAdded: credits,
+      lastPaymentAmount: paidCents / 100, lastPaymentDate: now,
     });
+    transaction.set(paymentRef, {
+      paymentId, orderId, userId, credits, planId: order.planId,
+      amount: paidCents / 100, amountCents: paidCents, currency: "BRL",
+      status: "credited", providerStatus: "approved", createdAt: recorded.createdAt || now,
+      creditedAt: now, updatedAt: now,
+    }, { merge: true });
+    transaction.update(orderRef, { status: "completed", paymentId, approvedAt: now, completedAt: now });
+    transaction.set(ledgerRef, {
+      operationId: ledgerId, userId, firebaseUid: userData.firebaseUid || "",
+      type: "purchase", amount: credits, balanceBefore, balanceAfter,
+      xpBefore, xpAfter: newXp, xpAwarded, levelBefore: userData.level || "Buscador", levelAfter: level,
+      status: "committed", source: "mercadopago", paymentId, orderId, planId: order.planId,
+      createdAt: now, committedAt: now, idempotencyKey: ledgerId,
+    });
+    return { alreadyProcessed: false, orderId, userId, credits, planId: order.planId, userData, balanceAfter };
+  });
+}
 
-    res.json({
-      success: true,
-      orderId,
-      checkoutUrl: result.init_point,
-      preferenceId: result.id
-    });
-  } catch (err: any) {
-    console.error("Erro Mercado Pago:", err);
-    res.status(500).json({
-      error: "Erro ao criar pagamento no Mercado Pago."
-    });
-  }
-  }
-);
-
-// Mercado Pago webhook - automatic credit confirmation with signature verification
+// Só confirma entrega após o commit. Falha transitória retorna 503 para permitir reenvio.
 app.post("/api/mercadopago/webhook", async (req, res) => {
-  const clientIp = getClientIp(req);
-  if (!await checkDurableRateLimit(`webhook_${clientIp}`, 60, 60 * 1000)) {
-    return res.status(429).json({ error: "Taxa limite de requisições excedida." });
+  res.setHeader("Cache-Control", "no-store");
+  const secret = process.env.MERCADO_PAGO_WEBHOOK_SECRET?.trim();
+  if (!secret || !process.env.MERCADO_PAGO_ACCESS_TOKEN?.trim()) {
+    return res.status(503).json({ received: false, credited: false, error: "Pagamentos indisponíveis." });
   }
-
-  const webhookSecret = process.env.MERCADO_PAGO_WEBHOOK_SECRET;
-  const xSignature = req.headers["x-signature"] as string | undefined;
-  const xRequestId = req.headers["x-request-id"] as string | undefined;
-
-  const paymentId =
-    req.body?.data?.id ||
-    req.body?.id ||
-    req.query?.id ||
-    req.query?.["data.id"];
-
-  const dataId = String(paymentId || req.body?.data?.id || "");
-
-  const isProduction = process.env.NODE_ENV === "production";
-  if (isProduction || webhookSecret) {
-    const signatureResult = verifyMercadoPagoSignature({
-      xSignature,
-      xRequestId,
-      dataId,
-      secret: webhookSecret,
-    });
-    if (!signatureResult.isValid) {
-      console.warn(`[MP WEBHOOK] Assinatura HMAC inválida do webhook Mercado Pago: ${signatureResult.reason}`);
-      return res.status(401).json({
-        error: "Assinatura do webhook inválida.",
-        reason: signatureResult.reason,
-      });
-    }
-  }
-
+  const paymentId = validatePaymentNotification(req, secret);
+  if (!paymentId) return res.status(401).json({ received: false, error: "Assinatura ou identificação inválida." });
   try {
-    // Armazenamento estritamente minimizado do webhook (sem dados sensíveis)
-    await firestore.collection("webhook_logs").add({
-      action: req.body?.action || req.query?.topic || "payment",
-      type: req.body?.type || "unknown",
-      paymentId: paymentId ? String(paymentId) : "",
-      dataId: dataId || "",
-      clientIp,
-      receivedAt: new Date().toISOString()
-    });
-
-    if (!paymentId) {
-      return res.status(200).json({ received: true, noPaymentId: true });
+    if (!await checkDurableRateLimit(`webhook_${getClientIp(req)}`, 60, 60 * 1000)) {
+      return res.status(429).json({ received: false, error: "Aguarde e reenvie a notificação." });
     }
-
-    const payment = new Payment(mp);
-    const paymentInfo = await payment.get({ id: String(paymentId) });
-
-    if (paymentInfo.status !== "approved") {
-      await firestore.collection("payments").doc(String(paymentId)).set({
-        paymentId: String(paymentId),
-        status: String(paymentInfo.status || "unknown"),
-        rawStatus: paymentInfo.status || "",
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
-
-      return res.status(200).json({
-        received: true,
-        status: paymentInfo.status
-      });
-    }
-
-    // Validação estrita da moeda (BRL)
-    if (paymentInfo.currency_id && paymentInfo.currency_id !== "BRL") {
-      console.warn(`[MP WEBHOOK] Moeda incompatível (${paymentInfo.currency_id}) para pagamento ${paymentId}. Esperado BRL.`);
-      await firestore.collection("payments").doc(String(paymentId)).set({
-        paymentId: String(paymentId),
-        status: "rejected_invalid_currency",
-        currency: paymentInfo.currency_id,
-        createdAt: new Date().toISOString()
-      }, { merge: true });
-      return res.status(200).json({ received: true, ignored: true, reason: "invalid_currency" });
-    }
-
-    // Identificação OBRIGATÓRIA do pedido original armazenado no Firestore
-    const externalRef = paymentInfo.external_reference || paymentInfo.metadata?.orderId || paymentInfo.metadata?.order_id;
-    if (!externalRef) {
-      console.warn(`[MP WEBHOOK] Pagamento ${paymentId} aprovado sem external_reference de pedido.`);
-      await firestore.collection("payments").doc(String(paymentId)).set({
-        paymentId: String(paymentId),
-        status: "rejected_missing_order_reference",
-        amount: Number(paymentInfo.transaction_amount || 0),
-        createdAt: new Date().toISOString()
-      }, { merge: true });
-      return res.status(200).json({ received: true, ignored: true, reason: "missing_order_reference" });
-    }
-
-    const orderRef = firestore.collection("orders").doc(String(externalRef));
-    const orderDoc = await orderRef.get();
-    if (!orderDoc.exists) {
-      console.warn(`[MP WEBHOOK] Pedido original ${externalRef} não encontrado para o pagamento ${paymentId}.`);
-      await firestore.collection("payments").doc(String(paymentId)).set({
-        paymentId: String(paymentId),
-        orderId: String(externalRef),
-        status: "rejected_order_not_found",
-        amount: Number(paymentInfo.transaction_amount || 0),
-        createdAt: new Date().toISOString()
-      }, { merge: true });
-      return res.status(200).json({ received: true, ignored: true, reason: "order_not_found" });
-    }
-
-    const orderData = orderDoc.data() || {};
-    const targetUserId = String(orderData.userId || "");
-    if (!targetUserId) {
-      console.warn(`[MP WEBHOOK] Pedido original ${externalRef} sem userId válido.`);
-      return res.status(200).json({ received: true, ignored: true, reason: "invalid_order_user" });
-    }
-
-    // 1. Verificação de usuário divergente
-    const paymentUserId = paymentInfo.metadata?.userId || paymentInfo.metadata?.user_id;
-    if (paymentUserId && String(paymentUserId) !== targetUserId) {
-      console.warn(`[MP WEBHOOK] Divergência de usuário: pedido=${targetUserId}, pagamento=${paymentUserId}`);
-      await firestore.collection("payments").doc(String(paymentId)).set({
-        paymentId: String(paymentId),
-        orderId: String(externalRef),
-        status: "rejected_user_mismatch",
-        orderUserId: targetUserId,
-        paymentUserId: String(paymentUserId),
-        createdAt: new Date().toISOString()
-      }, { merge: true });
-      return res.status(200).json({ received: true, ignored: true, reason: "user_mismatch" });
-    }
-
-    // 2. Verificação de plano divergente
-    const paymentPlanId = paymentInfo.metadata?.planId || paymentInfo.metadata?.plan_id;
-    if (paymentPlanId && paymentPlanId !== orderData.planId) {
-      console.warn(`[MP WEBHOOK] Divergência de plano: pedido=${orderData.planId}, pagamento=${paymentPlanId}`);
-      await firestore.collection("payments").doc(String(paymentId)).set({
-        paymentId: String(paymentId),
-        orderId: String(externalRef),
-        status: "rejected_plan_mismatch",
-        orderPlanId: orderData.planId,
-        paymentPlanId,
-        createdAt: new Date().toISOString()
-      }, { merge: true });
-      return res.status(200).json({ received: true, ignored: true, reason: "plan_mismatch" });
-    }
-
-    // 3. Verificação de valor pago vs valor do pedido
-    const paidAmount = Number(paymentInfo.transaction_amount || 0);
-    const expectedAmount = Number(orderData.price || 0);
-    if (Math.abs(paidAmount - expectedAmount) > 0.01) {
-      console.warn(`[MP WEBHOOK] Divergência de valor: pago R$${paidAmount}, esperado R$${expectedAmount}`);
-      await firestore.collection("payments").doc(String(paymentId)).set({
-        paymentId: String(paymentId),
-        orderId: String(externalRef),
-        status: "rejected_amount_mismatch",
-        paidAmount,
-        expectedAmount,
-        createdAt: new Date().toISOString()
-      }, { merge: true });
-      return res.status(200).json({ received: true, ignored: true, reason: "amount_mismatch" });
-    }
-
-    // 4. Quantidade de créditos autoritativa do pedido original
-    const creditsToAdd = Number(orderData.credits || 0);
-    if (!creditsToAdd || creditsToAdd <= 0) {
-      console.warn(`[MP WEBHOOK] Pedido original sem créditos válidos: ${creditsToAdd}`);
-      return res.status(200).json({ received: true, ignored: true, reason: "invalid_order_credits" });
-    }
-
-    const paymentRef = firestore.collection("payments").doc(String(paymentId));
-    const userRef = firestore.collection("users").doc(targetUserId);
-    const ledgerOpId = `mp_pay_${paymentId}`;
-
-    let creditedUserData: any = null;
-    let balanceBeforeAfter = { before: 0, after: 0 };
-    let alreadyCredited = false;
-
-    await firestore.runTransaction(async (transaction: any) => {
-      const paymentDoc = await transaction.get(paymentRef);
-      if (paymentDoc.exists && paymentDoc.data()?.status === "credited") {
-        alreadyCredited = true;
-        return;
-      }
-
-      const freshOrderDoc = await transaction.get(orderRef);
-      if (freshOrderDoc.exists) {
-        const freshOrder = freshOrderDoc.data() || {};
-        if (freshOrder.status === "completed" || freshOrder.status === "approved") {
-          alreadyCredited = true;
-          return;
-        }
-      }
-
-      const userDoc = await transaction.get(userRef);
-      if (!userDoc.exists) {
-        transaction.set(paymentRef, {
-          paymentId: String(paymentId),
-          orderId: String(externalRef),
-          userId: targetUserId,
-          credits: creditsToAdd,
-          planId: orderData.planId,
-          amount: paidAmount,
-          status: "user_not_found",
-          createdAt: new Date().toISOString()
+    const topic = req.body?.type ?? req.query.type ?? req.query.topic;
+    if (topic !== undefined && topic !== "payment") return res.status(200).json({ received: true, ignored: true });
+    const info = await new Payment(mp).get({ id: paymentId });
+    if (String(info.id) !== paymentId) throw new Error("PAYMENT_ID_MISMATCH");
+    if (checkIsProduction() && info.live_mode !== true) throw new Error("PAYMENT_TEST_MODE_IN_PRODUCTION");
+    if (typeof info.status !== "string" || !info.status) throw new Error("PAYMENT_STATUS_UNAVAILABLE");
+    if (info.status !== "approved") {
+      const ref = firestore.collection("payments").doc(paymentId);
+      await firestore.runTransaction(async (transaction: any) => {
+        const snap = await transaction.get(ref);
+        const previous = snap.exists ? snap.data() || {} : {};
+        const reviewRequired = previous.status === "credited" && ["refunded", "charged_back", "cancelled"].includes(info.status!);
+        transaction.set(ref, {
+          paymentId,
+          // Um evento atrasado nunca apaga o comprovante de entrega.
+          status: previous.status === "credited" ? "credited" : info.status,
+          providerStatus: info.status, updatedAt: new Date().toISOString(),
+          ...(reviewRequired ? { reviewRequired: true, reviewReason: "payment_reversed_after_credit" } : {}),
         }, { merge: true });
-        return;
-      }
-
-      const userData = userDoc.data() || {};
-      creditedUserData = userData;
-
-      const currentCredits = Number(userData.credits || 0);
-      const currentXp = Number(userData.xp || 0);
-      const newXp = currentXp + Math.round(paidAmount * 5);
-      const { level } = checkXpLevel(newXp);
-
-      balanceBeforeAfter = {
-        before: currentCredits,
-        after: currentCredits + creditsToAdd
-      };
-
-      transaction.update(userRef, {
-        credits: currentCredits + creditsToAdd,
-        xp: newXp,
-        level,
-        lastPaymentId: String(paymentId),
-        lastPlanId: orderData.planId,
-        lastCreditsAdded: creditsToAdd,
-        lastPaymentAmount: paidAmount,
-        lastPaymentDate: new Date().toISOString()
       });
-
-      transaction.set(paymentRef, {
-        paymentId: String(paymentId),
-        userId: targetUserId,
-        credits: creditsToAdd,
-        planId: orderData.planId,
-        orderId: String(externalRef),
-        amount: paidAmount,
-        status: "credited",
-        createdAt: new Date().toISOString()
-      }, { merge: true });
-
-      transaction.set(orderRef, {
-        status: "completed",
-        paymentId: String(paymentId),
-        approvedAt: new Date().toISOString(),
-        completedAt: new Date().toISOString()
-      }, { merge: true });
-
-      const ledgerRef = firestore.collection("credit_ledger").doc(ledgerOpId);
-      transaction.set(ledgerRef, {
-        operationId: ledgerOpId,
-        userId: targetUserId,
-        firebaseUid: userData.firebaseUid || "",
-        type: "purchase",
-        amount: creditsToAdd,
-        balanceBefore: currentCredits,
-        balanceAfter: currentCredits + creditsToAdd,
-        status: "committed",
-        source: "mercadopago",
-        paymentId: String(paymentId),
-        orderId: String(externalRef),
-        planId: orderData.planId,
-        createdAt: new Date().toISOString(),
-        committedAt: new Date().toISOString(),
-        idempotencyKey: ledgerOpId
-      });
-    });
-
-    if (alreadyCredited) {
-      return res.status(200).json({ received: true, alreadyProcessed: true });
+      return res.status(200).json({ received: true, credited: false, status: info.status });
     }
-
-    if (creditedUserData) {
+    const settled = await commitApprovedPurchase(paymentId, info);
+    if (!settled.alreadyProcessed && settled.userData) {
       try {
         await queueAndSendPurchaseEmails(firestore, {
-          paymentId: String(paymentId),
-          orderId: String(externalRef || `ord_${paymentId}`),
-          customerEmail: creditedUserData.email || "",
-          customerName: creditedUserData.name || creditedUserData.birthName || "Consulente",
-          planName: orderData.planId === "ouro" ? "Plano Ouro" : "Plano Prata",
-          amount: paidAmount,
-          credits: creditsToAdd,
-          newBalance: balanceBeforeAfter.after,
+          paymentId, orderId: settled.orderId,
+          customerEmail: settled.userData.email || "", customerName: settled.userData.name || "Consulente",
+          planName: settled.planId === "ouro" ? "Plano Ouro" : "Plano Prata",
+          amount: info.transaction_amount!, credits: settled.credits, newBalance: settled.balanceAfter,
           approvedAt: new Date().toISOString(),
         });
-      } catch (emailErr) {
-        console.error("[MP WEBHOOK] Erro ao enviar emails de compra:", emailErr);
-      }
+      } catch { console.error("[MP WEBHOOK] Compra creditada; envio de e-mail não concluído."); }
     }
-
-    return res.status(200).json({ received: true, credited: true });
-  } catch (err) {
-    console.error("Erro webhook Mercado Pago:", err);
-
-    await firestore.collection("webhook_errors").add({
-      error: String(err),
-      createdAt: new Date().toISOString()
-    });
-
-    return res.status(200).json({ received: true, error: true });
+    return res.status(200).json({ received: true, credited: true, alreadyProcessed: settled.alreadyProcessed });
+  } catch (error: any) {
+    console.error("[MP WEBHOOK] Confirmação não concluída:", error);
+    try {
+      await firestore.collection("webhook_errors").add({
+        paymentId, error: String(error?.message || "payment_processing_failed").slice(0, 300),
+        status: "requires_retry_or_review", createdAt: new Date().toISOString(),
+      });
+    } catch { console.error("[MP WEBHOOK] Falha ao registrar diagnóstico de pagamento."); }
+    return res.status(503).json({ received: false, credited: false, error: "Pagamento ainda não confirmado no sistema. Reenvie a notificação." });
   }
 });
 

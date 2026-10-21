@@ -3,6 +3,22 @@ import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import test from "node:test";
 
+// Configuração restrita a este processo de teste. Nunca acessar Firebase real
+// nem chamar Gemini com credenciais do ambiente local/Vercel.
+Object.assign(process.env, {
+  NODE_ENV: "test",
+  VERCEL: "",
+  VERCEL_ENV: "",
+  FIREBASE_PROJECT_ID: "",
+  FIREBASE_CLIENT_EMAIL: "",
+  FIREBASE_PRIVATE_KEY: "",
+  FIRESTORE_EMULATOR_HOST: "",
+  GEMINI_API_KEY: "MY_GEMINI_API_KEY",
+  API_KEY: "MY_GEMINI_API_KEY",
+  ENFORCE_APP_CHECK: "false",
+  CRON_SECRET: crypto.randomBytes(32).toString("hex"),
+});
+
 const require = createRequire(import.meta.url);
 const {
   default: app,
@@ -36,44 +52,31 @@ async function requestFromTemporaryServer(path, options = {}) {
   }
 }
 
+// Estes testes verificam consultas; cadastro e concessão do bônus precisam
+// de testes próprios. Sem IP forjado, bypass de rate limit ou serviço real.
 async function createTestUser(emailPrefix = "consulente") {
-  const timestamp = Date.now() + "_" + Math.random().toString(36).substring(2, 7);
-  const email = `${emailPrefix}_${timestamp}@teste.com`;
-  const uid = `uid_${timestamp}`;
+  const suffix = crypto.randomUUID();
+  const uid = `uid_${suffix}`;
+  const userId = `usr_${suffix}`;
+  const email = `${emailPrefix}_${suffix}@example.invalid`;
+  const user = {
+    id: userId, firebaseUid: uid, email, emailVerified: true,
+    name: "Consulente Teste", birthName: "Consulente Teste",
+    birthDate: "1988-06-15", credits: 5, xp: 0, level: "Buscador",
+    role: "user", isBlocked: false,
+    createdAt: new Date().toISOString(),
+  };
+  await firestore.collection("users").doc(userId).set(user);
   const authHeader = `Bearer ${Buffer.from(
     JSON.stringify({ uid, email, email_verified: true })
   ).toString("base64")}`;
-  const fakeIp = `10.${Math.floor(Math.random() * 250) + 1}.${Math.floor(Math.random() * 250) + 1}.${Math.floor(Math.random() * 250) + 1}`;
-  const deviceId = `dev_${timestamp}`;
+  assert.equal((await firestore.collection("users").doc(userId).get()).data().credits, 5);
+  return { userId, user, authHeader, uid, email };
+}
 
-  const res = await requestFromTemporaryServer("/api/auth/register", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": authHeader,
-      "X-Forwarded-For": fakeIp,
-    },
-    body: JSON.stringify({
-      birthName: "Consulente Teste " + timestamp,
-      birthDate: "1988-06-15",
-      email,
-      termsAccepted: true,
-      privacyAccepted: true,
-      deviceId,
-    }),
-  });
-
-  const body = await res.json();
-  assert.equal(res.status, 200, `Falha ao registrar usuário: ${JSON.stringify(body)}`);
-  return {
-    userId: body.user.id,
-    user: body.user,
-    authHeader,
-    fakeIp,
-    deviceId,
-    uid,
-    email,
-  };
+async function userLedger(userId) {
+  return (await firestore.collection("credit_ledger")
+    .where("userId", "==", userId).get()).docs.map(doc => doc.data());
 }
 
 // ========================================================
@@ -92,7 +95,7 @@ test("Idempotência: dois usuários usando a mesma chave possuem escopos isolado
         "Content-Type": "application/json",
         "Authorization": userA.authHeader,
         "Idempotency-Key": sharedKey,
-        "X-Forwarded-For": userA.fakeIp,
+
       },
       body: JSON.stringify({
         question: "Caminhos de User A",
@@ -106,7 +109,7 @@ test("Idempotência: dois usuários usando a mesma chave possuem escopos isolado
         "Content-Type": "application/json",
         "Authorization": userB.authHeader,
         "Idempotency-Key": sharedKey,
-        "X-Forwarded-For": userB.fakeIp,
+
       },
       body: JSON.stringify({
         question: "Caminhos de User B",
@@ -116,9 +119,21 @@ test("Idempotência: dois usuários usando a mesma chave possuem escopos isolado
     }),
   ]);
 
-  // Nenhum deve ser 409 (pois os escopos por userId evitam colisão cruzada)
-  assert.notEqual(resA.status, 409, "User A não deve colidir com chave de User B");
-  assert.notEqual(resB.status, 409, "User B não deve colidir com chave de User A");
+  for (const [res, user] of [[resA, userA], [resB, userB]]) {
+    const body = await res.json();
+    assert.equal(res.status, 503, JSON.stringify(body));
+    assert.equal(body.refunded, true);
+    const keyDoc = await firestore.collection("idempotency_keys")
+      .doc(buildScopedIdempotencyDocId(user.userId, "tarot", sharedKey)).get();
+    assert.equal(keyDoc.exists, true);
+    assert.equal(keyDoc.data().userId, user.userId);
+    assert.equal(keyDoc.data().status, "refunded");
+    assert.equal((await firestore.collection("users").doc(user.userId).get()).data().credits, 5);
+  }
+  assert.notEqual(
+    buildScopedIdempotencyDocId(userA.userId, "tarot", sharedKey),
+    buildScopedIdempotencyDocId(userB.userId, "tarot", sharedKey)
+  );
 });
 
 test("Idempotência: reutilizar a mesma chave com pergunta diferente gera conflito 409 e impede débito", async () => {
@@ -132,7 +147,7 @@ test("Idempotência: reutilizar a mesma chave com pergunta diferente gera confli
       "Content-Type": "application/json",
       "Authorization": user.authHeader,
       "Idempotency-Key": key,
-      "X-Forwarded-For": user.fakeIp,
+
     },
     body: JSON.stringify({
       question: "Pergunta original sobre saúde",
@@ -140,7 +155,9 @@ test("Idempotência: reutilizar a mesma chave com pergunta diferente gera confli
       idempotencyKey: key,
     }),
   });
-  assert.ok(res1.status === 200 || res1.status === 503);
+  const body1 = await res1.json();
+  assert.equal(res1.status, 503, JSON.stringify(body1));
+  assert.equal(body1.refunded, true);
 
   // Segunda chamada com a MESMA chave mas pergunta DIFERENTE
   const res2 = await requestFromTemporaryServer("/api/oraculo/tarot", {
@@ -149,7 +166,7 @@ test("Idempotência: reutilizar a mesma chave com pergunta diferente gera confli
       "Content-Type": "application/json",
       "Authorization": user.authHeader,
       "Idempotency-Key": key,
-      "X-Forwarded-For": user.fakeIp,
+
     },
     body: JSON.stringify({
       question: "Pergunta totalmente diferente sobre negócios e riqueza",
@@ -161,6 +178,10 @@ test("Idempotência: reutilizar a mesma chave com pergunta diferente gera confli
   const body2 = await res2.json();
   assert.equal(res2.status, 409, "Deveria retornar 409 Conflict");
   assert.match(body2.error, /pergunta ou parâmetros diferentes/i);
+  const ledger = await userLedger(user.userId);
+  assert.equal(ledger.filter(row => row.type === "debit").length, 1);
+  assert.equal(ledger.filter(row => row.type === "refund").length, 1);
+  assert.equal((await firestore.collection("users").doc(user.userId).get()).data().credits, 5);
 });
 
 // ========================================================
@@ -169,50 +190,38 @@ test("Idempotência: reutilizar a mesma chave com pergunta diferente gera confli
 
 test("Repetição após resposta concluída: devolve resposta persistida sem novo débito e sem novo sorteio", async () => {
   const user = await createTestUser("repeat_user");
-  const key = "key_repeat_" + Date.now();
-
-  const res1 = await requestFromTemporaryServer("/api/oraculo/tarot", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": user.authHeader,
-      "Idempotency-Key": key,
-      "X-Forwarded-For": user.fakeIp,
-    },
-    body: JSON.stringify({
-      question: "Orientação espiritual para a semana",
-      slotsCount: 1,
-      idempotencyKey: key,
-    }),
+  const key = "key_repeat_" + crypto.randomUUID();
+  const question = "Orientação espiritual para a semana";
+  // Prepara uma consulta concluída pelo core real, sem depender de IA externa.
+  const debit = await executeCreditDebitTransactionalCore(firestore, {
+    userRef: firestore.collection("users").doc(user.userId),
+    cost: 2, xpAwarded: 30, source: "tarot", consultationId: key,
+    idempotencyKey: key,
+    requestHash: computeRequestFingerprint({ question, slotsCount: 1 }),
   });
-
-  const body1 = await res1.json();
-  if (res1.status === 200) {
-    const originalCard = body1.drawn[0].nome;
-    const originalCredits = body1.creditsLeft;
-
-    // Repetição idêntica com a mesma chave e mesma pergunta
-    const res2 = await requestFromTemporaryServer("/api/oraculo/tarot", {
+  const original = {
+    success: true, drawn: [{ nome: "O Mago" }],
+    interpretation: "Resposta de teste persistida.", creditsLeft: 3,
+    xpAwarded: 30, newLevel: debit.newLevel,
+  };
+  await completeConsultationTransactionalCore(firestore, {
+    userId: user.userId, source: "tarot", idempotencyKey: key,
+    operationId: debit.operationId, responsePayload: original,
+  });
+  for (let repeat = 0; repeat < 2; repeat++) {
+    const res = await requestFromTemporaryServer("/api/oraculo/tarot", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": user.authHeader,
-        "Idempotency-Key": key,
-        "X-Forwarded-For": user.fakeIp,
-      },
-      body: JSON.stringify({
-        question: "Orientação espiritual para a semana",
-        slotsCount: 1,
-        idempotencyKey: key,
-      }),
+      headers: { "Content-Type": "application/json", Authorization: user.authHeader, "Idempotency-Key": key },
+      body: JSON.stringify({ question, slotsCount: 1, idempotencyKey: key }),
     });
-
-    const body2 = await res2.json();
-    assert.equal(res2.status, 200);
-    assert.equal(body2.alreadyProcessed, true, "Deve sinalizar que a consulta já havia sido processada");
-    assert.equal(body2.drawn[0].nome, originalCard, "Carta deve ser exatamente a mesma da consulta original persistida");
-    assert.equal(body2.creditsLeft, originalCredits, "Não deve haver novo débito de créditos");
+    const body = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.deepEqual(body, { ...original, alreadyProcessed: true });
   }
+  const savedUser = (await firestore.collection("users").doc(user.userId).get()).data();
+  assert.equal(savedUser.credits, 3);
+  assert.equal(savedUser.xp, 30);
+  assert.equal((await userLedger(user.userId)).filter(row => row.type === "debit").length, 1);
 });
 
 // ========================================================
@@ -230,7 +239,7 @@ test("Concorrência: duas consultas simultâneas com a mesma chave não duplicam
         "Content-Type": "application/json",
         "Authorization": user.authHeader,
         "Idempotency-Key": key,
-        "X-Forwarded-For": user.fakeIp,
+
       },
       body: JSON.stringify({
         question: "Abertura de caminhos",
@@ -243,7 +252,7 @@ test("Concorrência: duas consultas simultâneas com a mesma chave não duplicam
         "Content-Type": "application/json",
         "Authorization": user.authHeader,
         "Idempotency-Key": key,
-        "X-Forwarded-For": user.fakeIp,
+
       },
       body: JSON.stringify({
         question: "Abertura de caminhos",
@@ -252,18 +261,16 @@ test("Concorrência: duas consultas simultâneas com a mesma chave não duplicam
     }),
   ]);
 
-  const profileRes = await requestFromTemporaryServer("/api/user/profile", {
-    headers: {
-      "Authorization": user.authHeader,
-      "X-Forwarded-For": user.fakeIp,
-    },
-  });
-  const profile = await profileRes.json();
-  const credits = profile.user ? profile.user.credits : profile.credits;
-
-  // O usuário começou com 5 créditos; Búzios custa 3.
-  // Mesmo com chamadas concorrentes, não pode haver débito duplicado (saldo não pode ser menor que 2)
-  assert.ok(credits >= 2, `Saldo não pode duplicar débito: saldo atual é ${credits}`);
+  const results = await Promise.all([res1.json(), res2.json()]);
+  assert.deepEqual([res1.status, res2.status].sort(), [409, 503], JSON.stringify(results));
+  const failure = results[[res1.status, res2.status].indexOf(503)];
+  assert.equal(failure.refunded, true);
+  const userAfter = (await firestore.collection("users").doc(user.userId).get()).data();
+  assert.equal(userAfter.credits, 5, "Falha controlada deve devolver o saldo integral");
+  assert.equal(userAfter.xp, 0);
+  const ledger = await userLedger(user.userId);
+  assert.equal(ledger.filter(row => row.type === "debit").length, 1, "Somente um débito");
+  assert.equal(ledger.filter(row => row.type === "refund").length, 1, "Somente um estorno");
 });
 
 // ========================================================
@@ -282,7 +289,7 @@ test("Falha da IA depois do débito: executa estorno transacional e preserva cr�
       "Content-Type": "application/json",
       "Authorization": user.authHeader,
       "Idempotency-Key": key,
-      "X-Forwarded-For": user.fakeIp,
+
     },
     body: JSON.stringify({
       question: "Teste de falha de IA controlada",
@@ -292,13 +299,15 @@ test("Falha da IA depois do débito: executa estorno transacional e preserva cr�
   });
 
   const body = await res.json();
-  // Se a IA falhou, retorna 503 com confirmação de estorno
-  if (res.status === 503) {
-    assert.equal(body.refunded, true, "Deve confirmar que o estorno foi executado");
-    assert.match(body.error, /preservados e estornados/i);
-    // Saldo do usuário deve ter sido integralmente preservado
-    assert.equal(body.creditsLeft, 5, "Saldo deve retornar a 5 créditos após o estorno");
-  }
+  assert.equal(res.status, 503, JSON.stringify(body));
+  assert.equal(body.refunded, true, "Estorno precisa estar confirmado");
+  assert.equal(body.creditsLeft, 5);
+  const userAfter = (await firestore.collection("users").doc(user.userId).get()).data();
+  assert.equal(userAfter.credits, 5);
+  assert.equal(userAfter.xp, 0);
+  const ledger = await userLedger(user.userId);
+  assert.equal(ledger.filter(row => row.type === "debit").length, 1);
+  assert.equal(ledger.filter(row => row.type === "refund").length, 1);
 });
 
 // ========================================================
@@ -504,8 +513,9 @@ test("Recuperação: reconcilePendingOperations identifica operações stale e a
 // ========================================================
 
 test("Reconciliação Cron: /api/cron/reconcile aceita GET com paginação e processamento limitado", async () => {
-  const res = await requestFromTemporaryServer("/api/cron/reconcile?limit=10&staleSeconds=30", {
+  const res = await requestFromTemporaryServer("/api/cron/reconcile?limit=10&staleSeconds=120", {
     method: "GET",
+    headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
   });
 
   const body = await res.json();
@@ -524,10 +534,18 @@ test("Reconciliação Admin: /api/admin/reconcile rejeita usuários sem privilé
     method: "POST",
     headers: {
       "Authorization": normalUser.authHeader,
-      "X-Forwarded-For": normalUser.fakeIp,
+
     },
   });
 
   assert.equal(res.status, 403, "Usuário normal não pode invocar endpoint de admin");
 });
 
+
+// Não confundir execução local de testes com acesso público ao agendador.
+test("Reconciliação Cron: rejeita chamada sem token ou com token incorreto", async () => {
+  for (const headers of [{}, { Authorization: "Bearer incorreto" }]) {
+    const res = await requestFromTemporaryServer("/api/cron/reconcile", { headers });
+    assert.equal(res.status, 401);
+  }
+});
