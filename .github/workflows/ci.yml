@@ -20,6 +20,12 @@ jobs:
           node-version: 24.x
           cache: "npm"
 
+      - name: Setup Java 21 for Firestore Emulator
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - name: Install dependencies (clean)
         run: npm ci
 
@@ -34,3 +40,4 @@ jobs:
 
       - name: Build production bundle
         run: npm run build
+
