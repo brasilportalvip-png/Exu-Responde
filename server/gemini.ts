@@ -1,15 +1,11 @@
-import { GoogleGenAI } from "@google/genai";
+import type { GoogleGenAI } from "@google/genai";
 
-// ======================================================
-// CONFIGURAÇÃO OFICIAL DOS MODELOS GEMINI (ANTIQUEDA)
-// Modelos oficiais do SDK @google/genai com fallback progressivo
-// ======================================================
-
+// As variáveis da Vercel têm prioridade sobre estes padrões.
 export const GEMINI_MODELS = [
-  process.env.GEMINI_PRIMARY_MODEL?.trim() || "gemini-2.5-flash",
-  process.env.GEMINI_SECONDARY_MODEL?.trim() || "gemini-1.5-flash",
-  process.env.GEMINI_LITE_MODEL?.trim() || "gemini-2.0-flash",
-].filter((model, index, arr): model is string => Boolean(model) && arr.indexOf(model) === index);
+  process.env.GEMINI_PRIMARY_MODEL?.trim() || "gemini-3.8-flash",
+  process.env.GEMINI_SECONDARY_MODEL?.trim() || "gemini-3.6-flash",
+  process.env.GEMINI_LITE_MODEL?.trim() || "gemini-3.5-flash-lite",
+].filter((model, index, models) => Boolean(model) && models.indexOf(model) === index);
 
 export interface GeminiTelemetryResult {
   text: string;
@@ -20,165 +16,142 @@ export interface GeminiTelemetryResult {
   latencyMs: number;
 }
 
-// Orçamento total equilibrado (22s) para não exceder limites de serverless e reservar tempo para persistência/estorno
+// Orçamento apenas da IA; o limite da função deve também comportar o banco.
 export const GEMINI_GLOBAL_TIMEOUT_MS = 22_000;
 export const GEMINI_REQUEST_TIMEOUT_MS = 7_500;
-export const MAX_ATTEMPTS_PER_MODEL = 2; // Até 2 tentativas por modelo apenas se o erro for transitório/recuperável
+export const MAX_ATTEMPTS_PER_MODEL = 2;
+const MIN_ATTEMPT_MS = 1_000;
+const SAFETY_MARGIN_MS = 500;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function messageOf(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object" && "message" in error) return String(error.message);
+  return String(error);
 }
 
 export function getGeminiErrorStatus(error: unknown): number | null {
   if (!error || typeof error !== "object") return null;
-  const e = error as { status?: number; code?: number; response?: { status?: number } };
-  return e.status ?? e.code ?? e.response?.status ?? null;
+  const e = error as any;
+  for (const value of [e.status, e.response?.status, e.code, e.error?.code]) {
+    const number = Number(value);
+    if (Number.isInteger(number) && number >= 100 && number <= 599) return number;
+  }
+  return null;
 }
 
 export function isRetryableGeminiError(error: unknown): boolean {
   const status = getGeminiErrorStatus(error);
-  // Erros definitivos (400 bad request, 401 unauthenticated, 403 forbidden, 404 not found) NUNCA devem ser retentados no mesmo modelo
-  if (status && [400, 401, 403, 404].includes(status)) {
-    return false;
-  }
+  if (status !== null) return [408, 429, 500, 502, 503, 504].includes(status);
+  const code = (error as any)?.code;
+  if (["GEMINI_EMPTY_RESPONSE", "GEMINI_REQUEST_TIMEOUT"].includes(code)) return true;
+  const message = messageOf(error).toLowerCase();
+  if (/api key not valid|unauthenticated|permission denied|not found/.test(message)) return false;
+  return /timeout|timed out|network|fetch failed|socket|connection|rate limit|resource[_ ]exhausted|temporarily unavailable|service unavailable/.test(message);
+}
 
-  if (status && [408, 429, 500, 502, 503, 504].includes(status)) {
-    return true;
-  }
-
-  const message =
-    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-
-  if (
-    message.includes("api key not valid") ||
-    message.includes("unauthenticated") ||
-    message.includes("permission denied") ||
-    message.includes("not found")
-  ) {
-    return false;
-  }
-
-  return (
-    message.includes("timeout") ||
-    message.includes("timed out") ||
-    message.includes("network") ||
-    message.includes("fetch failed") ||
-    message.includes("socket") ||
-    message.includes("connection") ||
-    message.includes("rate limit") ||
-    message.includes("resource exhausted") ||
-    message.includes("temporarily unavailable") ||
-    message.includes("service unavailable") ||
-    message.includes("503") ||
-    message.includes("429")
-  );
+function failure(message: string, code: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
 }
 
 export async function executeGeminiWithFallback(
   ai: GoogleGenAI,
-  params: {
-    contents: any;
-    systemInstruction: string;
-  }
+  params: { contents: any; systemInstruction: string }
 ): Promise<GeminiTelemetryResult> {
+  const startTime = Date.now();
+  const deadline = startTime + GEMINI_GLOBAL_TIMEOUT_MS - SAFETY_MARGIN_MS;
   const errors: string[] = [];
   const fallbackReasons: string[] = [];
-  const startTime = Date.now();
+  const retryModels = new Set<string>();
+  let attemptsCount = 0;
   let fallbackCount = 0;
-  let totalAttempts = 0;
+  let previousModel: string | undefined;
+  let budgetExhausted = false;
 
-  for (let modelIndex = 0; modelIndex < GEMINI_MODELS.length; modelIndex++) {
-    const model = GEMINI_MODELS[modelIndex];
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
-      totalAttempts++;
-      const elapsed = Date.now() - startTime;
-      const remainingBudget = GEMINI_GLOBAL_TIMEOUT_MS - elapsed;
-
-      // Reserva de segurança de ao menos 2 segundos
-      if (remainingBudget < 2000) {
-        throw new Error(
-          `Orçamento de tempo (${Math.round(GEMINI_GLOBAL_TIMEOUT_MS / 1000)}s) atingido para a chamada de IA.`
-        );
+  // Uma tentativa em cada modelo antes de repetir qualquer modelo.
+  for (let round = 1; round <= MAX_ATTEMPTS_PER_MODEL; round++) {
+    const models = round === 1 ? GEMINI_MODELS : [...retryModels];
+    for (let index = 0; index < models.length; index++) {
+      const model = models[index];
+      const remaining = deadline - Date.now();
+      const remainingModels = models.length - index;
+      // Divide o tempo restante para não deixar o último modelo sem oportunidade.
+      const requestTimeout = Math.min(GEMINI_REQUEST_TIMEOUT_MS, Math.floor(remaining / remainingModels));
+      if (requestTimeout < MIN_ATTEMPT_MS) {
+        budgetExhausted = true;
+        break;
       }
-
-      const requestTimeout = Math.min(GEMINI_REQUEST_TIMEOUT_MS, remainingBudget);
+      if (previousModel !== undefined && previousModel !== model) fallbackCount++;
+      previousModel = model;
+      attemptsCount++;
       const controller = new AbortController();
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutHandle = setTimeout(() => {
-          controller.abort();
-          reject(new Error(`Timeout de ${Math.round(requestTimeout / 1000)}s no modelo ${model}`));
-        }, requestTimeout);
-      });
-
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
+      console.info(`[GEMINI_ATTEMPT] model=${model} round=${round} timeoutMs=${requestTimeout}`);
       try {
-        const generatePromise = ai.models.generateContent({
-          model,
-          contents: params.contents,
-          config: {
-            systemInstruction: params.systemInstruction,
-            abortSignal: controller.signal,
-          },
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(failure("Tempo limite da tentativa Gemini excedido.", "GEMINI_REQUEST_TIMEOUT"));
+            controller.abort();
+          }, requestTimeout);
         });
-
-        const response = await Promise.race([generatePromise, timeoutPromise]);
-
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-
-        const text = typeof response?.text === "string" ? response.text.trim() : "";
-        if (!text) {
-          throw new Error(`Modelo ${model} retornou resposta vazia.`);
+        const response = await Promise.race([
+          ai.models.generateContent({
+            model,
+            contents: params.contents,
+            config: {
+              systemInstruction: params.systemInstruction,
+              abortSignal: controller.signal,
+            },
+          }),
+          timeout,
+        ]);
+        // Não repetir bloqueios de segurança em outros modelos.
+        const finishReason = String(response.candidates?.[0]?.finishReason || "");
+        if (response.promptFeedback?.blockReason ||
+            ["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "RECITATION", "IMAGE_SAFETY"].includes(finishReason)) {
+          throw failure("Não foi possível gerar uma resposta para esta solicitação.", "GEMINI_CONTENT_BLOCKED");
         }
-
-        const latencyMs = Date.now() - startTime;
-
-        return {
-          text,
-          modelUsed: model,
-          attemptsCount: totalAttempts,
-          fallbackCount,
-          fallbackReasons,
-          latencyMs,
-        };
-      } catch (err: unknown) {
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-
-        const errMsg = err instanceof Error ? err.message : String(err);
-        const retryable = isRetryableGeminiError(err);
-        errors.push(`${model} (tentativa ${attempt}): ${errMsg}`);
-
-        // Se o erro NÃO for transitório (erro de chave, permissão, payload inválido), pula imediatamente para fallback
-        if (!retryable) {
-          fallbackReasons.push(`${model}: Erro definitivo [${errMsg}]`);
-          break;
+        if (finishReason === "MAX_TOKENS") {
+          throw failure("A resposta foi interrompida antes de ser concluída.", "GEMINI_INCOMPLETE_RESPONSE");
         }
-
-        // Se esgotou as tentativas no modelo atual, avança para o próximo modelo na esteira
-        if (attempt >= MAX_ATTEMPTS_PER_MODEL) {
-          fallbackReasons.push(`${model}: ${MAX_ATTEMPTS_PER_MODEL} tentativas esgotadas [${errMsg}]`);
-          break;
+        const text = typeof response.text === "string" ? response.text.trim() : "";
+        if (!text) throw failure("O modelo retornou resposta vazia.", "GEMINI_EMPTY_RESPONSE");
+        return { text, modelUsed: model, attemptsCount, fallbackCount, fallbackReasons, latencyMs: Date.now() - startTime };
+      } catch (error: unknown) {
+        const status = getGeminiErrorStatus(error);
+        const code = (error as any)?.code;
+        // Registra diagnóstico no servidor, sem incluir o texto da consulta.
+        const reason = `${model}: ${timedOut ? "timeout" : status ?? code ?? "erro de comunicação"}`;
+        errors.push(reason);
+        fallbackReasons.push(reason);
+        console.warn(`[GEMINI_FAILED] ${reason} round=${round}`);
+        if (code === "GEMINI_CONTENT_BLOCKED" || status === 401 || status === 403 || status === 400) {
+          // Repetir credenciais ou payload inválidos não resolve a falha.
+          throw Object.assign(failure("Não foi possível concluir a consulta de IA.", code === "GEMINI_CONTENT_BLOCKED" ? code : "GEMINI_CONFIGURATION_ERROR"), {
+            details: errors, fallbackReasons, attemptsCount, latencyMs: Date.now() - startTime,
+          });
         }
-
-        // Backoff rápido com jitter
-        const jitter = Math.floor(Math.random() * 200);
-        const delay = Math.min(1500, 400 * Math.pow(2, attempt - 1) + jitter);
-        await sleep(delay);
+        if (timedOut || isRetryableGeminiError(error)) retryModels.add(model);
+        else retryModels.delete(model);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        controller.abort();
       }
     }
-
-    if (modelIndex < GEMINI_MODELS.length - 1) {
-      fallbackCount++;
-      await sleep(250);
+    if (budgetExhausted) break;
+    if (round < MAX_ATTEMPTS_PER_MODEL && retryModels.size > 0) {
+      const delay = 300 + Math.floor(Math.random() * 200);
+      if (deadline - Date.now() < delay + MIN_ATTEMPT_MS) {
+        budgetExhausted = true;
+        break;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
     }
   }
-
-  const exhaustionError: any = new Error(
-    "Todos os modelos da esteira de sabedoria ancestral falharam ou esgotaram tentativas."
-  );
-  exhaustionError.code = "ALL_GEMINI_MODELS_FAILED";
-  exhaustionError.details = errors;
-  exhaustionError.fallbackReasons = fallbackReasons;
-  throw exhaustionError;
+  // O chamador fará o estorno ou registrará a recuperação; não inventamos uma leitura.
+  throw Object.assign(failure("Não foi possível obter uma resposta completa da IA.", "ALL_GEMINI_MODELS_FAILED"), {
+    details: errors, fallbackReasons, attemptsCount, fallbackCount,
+    latencyMs: Date.now() - startTime, budgetExhausted,
+  });
 }

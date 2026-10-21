@@ -1,5 +1,34 @@
 import crypto from "node:crypto";
 
+function creditError(message: string, code = "CREDIT_STATE_INVALID", status = 409): never {
+  const error: any = new Error(message);
+  error.status = status;
+  error.code = code;
+  throw error;
+}
+
+function safeCreditNumber(value: any, label: string, positive = false): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < (positive ? 1 : 0)) {
+    creditError(`Valor inválido em ${label}. Operação não executada.`);
+  }
+  return value;
+}
+
+function assertConsultationLink(key: any, debit: any, userId: string, operationId: string, source: string): void {
+  if (key.userId !== userId || debit.userId !== userId) {
+    creditError("Operação pertence a outro usuário ou não possui proprietário válido.", "USER_MISMATCH", 403);
+  }
+  if (!operationId || key.operationId !== operationId || debit.operationId !== operationId ||
+      debit.type !== "debit" || key.source !== source || debit.source !== source ||
+      !key.idempotencyKey || key.idempotencyKey !== debit.idempotencyKey ||
+      key.cost !== debit.amount || key.xpAwarded !== debit.xpAwarded) {
+    creditError("O débito e a consulta não correspondem. Recuperação requer conferência.");
+  }
+  safeCreditNumber(debit.amount, "débito", true);
+  safeCreditNumber(debit.xpAwarded, "XP do débito");
+}
+
+
 export interface CreditLedgerRecord {
   operationId: string;
   idempotencyKey?: string;
@@ -230,12 +259,12 @@ export async function executeCreditDebitTransactional(
   const sanitizedKey = keyValidation.cleanKey;
 
   // Validação estrita de valores numéricos inteiros finitos
-  if (!Number.isInteger(params.cost) || params.cost <= 0) {
+  if (!Number.isSafeInteger(params.cost) || params.cost <= 0) {
     const err: any = new Error(`Valor de custo inválido (${params.cost}). Deve ser um número inteiro positivo.`);
     err.status = 400;
     throw err;
   }
-  if (!Number.isInteger(params.xpAwarded) || params.xpAwarded < 0) {
+  if (!Number.isSafeInteger(params.xpAwarded) || params.xpAwarded < 0) {
     const err: any = new Error(`Valor de XP inválido (${params.xpAwarded}). Deve ser um número inteiro não negativo.`);
     err.status = 400;
     throw err;
@@ -276,21 +305,21 @@ export async function executeCreditDebitTransactional(
       throw err;
     }
 
-    const currentCredits = Number(userData.credits || 0);
-    const currentXp = Number(userData.xp || 0);
+    const currentCredits = safeCreditNumber(userData.credits ?? 0, "saldo");
+    const currentXp = safeCreditNumber(userData.xp ?? 0, "XP");
 
     if (keySnap && keySnap.exists) {
       const keyData = keySnap.data() || {};
 
       // 1. Validação de isolamento de usuário: chave não pode ser reutilizada por outro usuário
-      if (keyData.userId && keyData.userId !== userDoc.id) {
+      if (keyData.userId !== userDoc.id) {
         const err: any = new Error("Chave de idempotência vinculada a outro usuário.");
         err.status = 409;
         throw err;
       }
 
       // 2. Validação de modalidade: mesma chave com modalidade diferente gera conflito
-      if (keyData.source && keyData.source !== params.source) {
+      if (keyData.source !== params.source) {
         const err: any = new Error(
           `Chave de idempotência reutilizada para modalidade diferente (${keyData.source} vs ${params.source}).`
         );
@@ -299,7 +328,7 @@ export async function executeCreditDebitTransactional(
       }
 
       // 3. Validação de integridade do conteúdo da requisição
-      if (params.requestHash && keyData.requestHash && keyData.requestHash !== params.requestHash) {
+      if ((keyData.requestHash || "") !== (params.requestHash || "")) {
         const err: any = new Error(
           "Chave de idempotência reutilizada com pergunta ou parâmetros diferentes da consulta original."
         );
@@ -307,6 +336,19 @@ export async function executeCreditDebitTransactional(
         throw err;
       }
 
+      if (typeof keyData.operationId !== "string" || !keyData.operationId || keyData.operationId.includes("/")) {
+        creditError("Identificador do débito ausente ou inválido.");
+      }
+      const debitSnap = await transaction.get(firestore.collection("credit_ledger").doc(keyData.operationId));
+      if (!debitSnap.exists) creditError("Débito original não encontrado.");
+      const debitData = debitSnap.data() || {};
+      assertConsultationLink(keyData, debitData, userDoc.id, keyData.operationId, params.source);
+      if (keyData.status === "completed" && (debitData.status !== "completed" || keyData.persistedResponse == null)) {
+        creditError("Resposta concluída inconsistente. Aguarde recuperação.");
+      }
+      if (keyData.status === "refunded" && !["refunded", "reversed"].includes(debitData.status)) {
+        creditError("Estorno ainda não confirmado no débito original.");
+      }
       // 4. Se a consulta já foi concluída, devolve a resposta persistida sem novo débito e sem novo XP
       if (keyData.status === "completed") {
         return {
@@ -324,7 +366,7 @@ export async function executeCreditDebitTransactional(
 
       // 5. Se a consulta já foi estornada (ou falhou definitivamente):
       // Bloqueia reutilização da chave estornada para proteger contra interferência de processos atrasados
-      if (keyData.status === "refunded" || keyData.status === "failed") {
+      if (keyData.status === "refunded") {
         const err: any = new Error(
           "Esta chave de idempotência refere-se a uma consulta que já foi estornada. Gere uma nova consulta com uma nova chave."
         );
@@ -354,6 +396,7 @@ export async function executeCreditDebitTransactional(
         err.code = "STALE_OPERATION_PENDING_RECOVERY";
         throw err;
       }
+      creditError("Estado da consulta exige recuperação; a chave não pode gerar novo débito.");
     }
 
     // Validação de saldo
@@ -367,7 +410,7 @@ export async function executeCreditDebitTransactional(
     }
 
     const balanceAfter = currentCredits - params.cost;
-    const newXp = currentXp + params.xpAwarded;
+    const newXp = safeCreditNumber(currentXp + params.xpAwarded, "novo XP");
     const levelBefore = userData.level || "Buscador";
     const newLevel = getSpiritualLevelName(newXp);
     const operationId = "op_deb_" + crypto.randomUUID();
@@ -492,7 +535,7 @@ export async function completeConsultationTransactional(
     const keyData = keySnap.data() || {};
 
     // Valida correspondência de usuário
-    if (keyData.userId && keyData.userId !== params.userId) {
+    if (keyData.userId !== params.userId) {
       const err: any = new Error("Chave de idempotência vinculada a outro usuário.");
       err.status = 403;
       err.code = "USER_MISMATCH";
@@ -500,7 +543,7 @@ export async function completeConsultationTransactional(
     }
 
     // Valida correspondência exata de operationId para impedir que processos atrasados interfiram
-    if (keyData.operationId && keyData.operationId !== params.operationId) {
+    if (keyData.operationId !== params.operationId) {
       const err: any = new Error(
         `Operação divergente: a chave está vinculada à operação ${keyData.operationId}, mas a conclusão solicitou ${params.operationId}.`
       );
@@ -509,6 +552,22 @@ export async function completeConsultationTransactional(
       throw err;
     }
 
+    if (!ledgerSnap.exists) creditError("Débito original não encontrado para conclusão.");
+    const ledgerData = ledgerSnap.data() || {};
+    assertConsultationLink(keyData, ledgerData, params.userId, params.operationId, params.source);
+    if (["refunded", "reversed"].includes(ledgerData.status)) {
+      creditError("O débito já foi estornado.", "OPERATION_ALREADY_REFUNDED");
+    }
+    if (params.responsePayload == null || typeof params.responsePayload !== "object" ||
+        Array.isArray(params.responsePayload) || Object.keys(params.responsePayload).length === 0) {
+      creditError("Resposta completa obrigatória para concluir a consulta.");
+    }
+    if (keyData.status === "completed" && (ledgerData.status !== "completed" || keyData.persistedResponse == null)) {
+      creditError("Conclusão inconsistente no registro original.");
+    }
+    if (keyData.status !== "completed" && (keyData.status !== "processing" || ledgerData.status !== "committed")) {
+      creditError("Estado da operação não permite conclusão.");
+    }
     // Se a consulta foi estornada por processo de timeout/reconciliação, rejeita com erro explícito
     if (keyData.status === "refunded") {
       const err: any = new Error(
@@ -632,7 +691,7 @@ export async function executeCreditRefundTransactional(
     }
 
     // Validação 2: Operação deve pertencer ao mesmo usuário autenticado
-    if (origData.userId && origData.userId !== userDoc.id) {
+    if (origData.userId !== userDoc.id) {
       const err: any = new Error(
         "Operação original pertence a outro consulente. Estorno não autorizado."
       );
@@ -640,9 +699,19 @@ export async function executeCreditRefundTransactional(
       throw err;
     }
 
+    if (origData.operationId !== params.originalOperationId || origData.source !== params.source) {
+      creditError("Operação ou modalidade divergente no estorno.");
+    }
+    if (params.idempotencyKey && params.idempotencyKey !== origData.idempotencyKey) {
+      creditError("Chave divergente no estorno.");
+    }
+    if (!keySnap?.exists) creditError("Registro da consulta ausente; estorno exige reconciliação.");
+    const refundKeyData = keySnap.data() || {};
+    assertConsultationLink(refundKeyData, origData, userDoc.id, params.originalOperationId, params.source);
+
     // Validação 3: Derivar valor do estorno do débito original e rejeitar divergências
     const originalDebitAmount = Number(origData.amount || 0);
-    if (!Number.isInteger(originalDebitAmount) || originalDebitAmount <= 0) {
+    if (!Number.isSafeInteger(originalDebitAmount) || originalDebitAmount <= 0) {
       const err: any = new Error("Valor do débito original é inválido.");
       err.status = 400;
       throw err;
@@ -662,6 +731,17 @@ export async function executeCreditRefundTransactional(
 
     const userData = userDoc.data() || {};
 
+    // Confirma o lançamento de devolução antes de informar estorno já realizado.
+    if (origData.status === "refunded" || origData.status === "reversed") {
+      if (!origData.refundOperationId) creditError("Comprovante do estorno ausente.");
+      const refundProof = await transaction.get(firestore.collection("credit_ledger").doc(origData.refundOperationId));
+      const proof = refundProof.exists ? refundProof.data() : null;
+      if (!proof || proof.type !== "refund" || proof.userId !== userDoc.id ||
+          proof.originalOperationId !== params.originalOperationId || proof.amount !== originalDebitAmount) {
+        creditError("Lançamento de estorno inconsistente; devolução não confirmada.");
+      }
+    }
+
     // Validação 4: Idempotência de estorno / Proteção contra duplo estorno simultâneo
     if (origData.status === "refunded" || origData.status === "reversed") {
       console.warn(
@@ -677,26 +757,20 @@ export async function executeCreditRefundTransactional(
       };
     }
 
-    // Validação 5: Se a consulta já estiver concluída e NÃO for estorno administrativo explícito
-    if (origData.status === "completed" && !params.isAdministrative) {
-      console.warn(
-        `[REFUND] Operação ${params.originalOperationId} já foi concluída com sucesso. Recuperação de falha não deve estornar consultas concluídas.`
-      );
-      return {
-        operationId: params.originalOperationId,
-        balanceAfter: Number(userData.credits || 0),
-        newXp: Number(userData.xp || 0),
-        newLevel: userData.level || "Buscador",
-        alreadyRefunded: true,
-        refundedAmount: 0,
-      };
+    // Consulta concluída não é um estorno bem-sucedido.
+    if ((origData.status === "completed" || refundKeyData.status === "completed") && !params.isAdministrative) {
+      creditError("Consulta já concluída; nenhum crédito foi estornado.", "OPERATION_ALREADY_COMPLETED");
+    }
+    if (!["committed", "completed"].includes(origData.status) ||
+        !["processing", "completed"].includes(refundKeyData.status)) {
+      creditError("Estado incompatível com estorno.");
     }
 
-    const xpToRevert = Number(origData.xpAwarded || 0);
-    const currentCredits = Number(userData.credits || 0);
-    const currentXp = Number(userData.xp || 0);
+    const xpToRevert = safeCreditNumber(origData.xpAwarded, "XP do débito");
+    const currentCredits = safeCreditNumber(userData.credits ?? 0, "saldo");
+    const currentXp = safeCreditNumber(userData.xp ?? 0, "XP");
 
-    const balanceAfter = currentCredits + originalDebitAmount;
+    const balanceAfter = safeCreditNumber(currentCredits + originalDebitAmount, "saldo após estorno");
     const newXp = Math.max(0, currentXp - xpToRevert);
     const newLevel = getSpiritualLevelName(newXp);
 
@@ -732,7 +806,7 @@ export async function executeCreditRefundTransactional(
       balanceAfter,
       xpBefore: currentXp,
       xpAfter: newXp,
-      xpAwarded: -xpToRevert,
+      xpAwarded: newXp - currentXp,
       levelBefore: userData.level || "Buscador",
       levelAfter: newLevel,
       status: "refunded",
@@ -784,7 +858,7 @@ export async function recoverStaleOperationTransactional(
   refundedAmount?: number;
 }> {
   // O tempo mínimo real para abandono deve ser de ao menos 60 segundos (padrão 90s)
-  const timeoutMs = Math.max(60_000, Number(params.staleTimeoutMs || 90_000));
+  const timeoutMs = Math.max(90_000, safeCreditNumber(params.staleTimeoutMs ?? 90_000, "prazo de recuperação", true));
   const now = new Date().toISOString();
   const nowMs = Date.now();
   const keyDocRef = firestore.collection("idempotency_keys").doc(params.keyDocId);
@@ -805,6 +879,9 @@ export async function recoverStaleOperationTransactional(
 
     const keyData = keySnap.data() || {};
 
+    if (!origSnap.exists || !userSnap.exists) creditError("Débito ou usuário ausente para recuperação.");
+    assertConsultationLink(keyData, origSnap.data() || {}, params.expectedUserId, params.expectedOperationId, keyData.source);
+
     // PONTO CRÍTICO DE CORRIDA: Se a consulta foi concluída no intervalo de seleção, ABORTA o estorno!
     if (keyData.status === "completed") {
       return { resolved: false, reason: "already_completed" };
@@ -821,7 +898,9 @@ export async function recoverStaleOperationTransactional(
     }
 
     // Valida se o registro ainda está stale no momento da transação
-    const createdAtMs = new Date(keyData.createdAt || 0).getTime();
+    const createdAtMs = new Date(keyData.createdAt).getTime();
+    if (!Number.isFinite(createdAtMs) || createdAtMs <= 0) creditError("Data da consulta inválida.");
+    if (keyData.status !== "processing") creditError("Estado inválido para recuperação automática.");
     if (nowMs - createdAtMs < timeoutMs) {
       return { resolved: false, reason: "not_stale" };
     }
@@ -839,13 +918,15 @@ export async function recoverStaleOperationTransactional(
       return { resolved: false, reason: "ledger_already_refunded" };
     }
 
-    const refundAmount = Number(origData.amount || keyData.cost || 0);
-    const xpToRevert = Number(origData.xpAwarded || keyData.xpAwarded || 0);
+    if (origData.status === "completed") return { resolved: false, reason: "already_completed" };
+    if (origData.status !== "committed") creditError("Débito não permite recuperação automática.");
+    const refundAmount = safeCreditNumber(origData.amount, "débito", true);
+    const xpToRevert = safeCreditNumber(origData.xpAwarded, "XP do débito");
     const userData = userSnap.data() || {};
-    const currentCredits = Number(userData.credits || 0);
-    const currentXp = Number(userData.xp || 0);
+    const currentCredits = safeCreditNumber(userData.credits ?? 0, "saldo");
+    const currentXp = safeCreditNumber(userData.xp ?? 0, "XP");
 
-    const balanceAfter = currentCredits + refundAmount;
+    const balanceAfter = safeCreditNumber(currentCredits + refundAmount, "saldo após recuperação");
     const newXp = Math.max(0, currentXp - xpToRevert);
     const newLevel = getSpiritualLevelName(newXp);
     const refundOpId = "op_ref_" + crypto.randomUUID();
@@ -876,7 +957,7 @@ export async function recoverStaleOperationTransactional(
       balanceAfter,
       xpBefore: currentXp,
       xpAfter: newXp,
-      xpAwarded: -xpToRevert,
+      xpAwarded: newXp - currentXp,
       levelBefore: userData.level || "Buscador",
       levelAfter: newLevel,
       status: "refunded",
@@ -927,8 +1008,8 @@ export async function reconcilePendingOperations(
   firestore: any,
   options?: ReconcileOptions
 ): Promise<ReconcileResult> {
-  const batchLimit = Math.min(Math.max(1, Number(options?.limit || 25)), 100);
-  const staleTimeoutMs = Math.max(60_000, Number(options?.staleTimeoutMs || 90_000));
+  const batchLimit = Math.min(safeCreditNumber(options?.limit ?? 25, "limite", true), 100);
+  const staleTimeoutMs = Math.max(90_000, safeCreditNumber(options?.staleTimeoutMs ?? 90_000, "prazo de recuperação", true));
 
   const result: ReconcileResult = {
     success: true,
@@ -988,6 +1069,12 @@ export async function reconcilePendingOperations(
         });
         result.resolvedReconciliationsCount++;
       } catch (err: any) {
+        if (err.code === "OPERATION_ALREADY_COMPLETED") {
+          await doc.ref.update({ status: "resolved", resolution: "already_completed", resolvedAt: new Date().toISOString() });
+          result.skippedCompletedCount++;
+          result.resolvedReconciliationsCount++;
+          continue;
+        }
         console.error(`[RECONCILE] Falha ao processar reconciliação ${doc.id}:`, err);
         result.errors.push(`Reconciliação ${doc.id}: ${err.message}`);
         await doc.ref.update({
@@ -1033,12 +1120,7 @@ export async function reconcilePendingOperations(
 
       // Trata registros inválidos para não bloquear a esteira
       if (!keyData.operationId || !keyData.userId) {
-        await doc.ref.update({
-          status: "failed",
-          updatedAt: new Date().toISOString(),
-          error: "Registro de idempotência inválido sem userId ou operationId.",
-        });
-        result.errors.push(`Chave ${doc.id} marcada como inválida por dados corrompidos.`);
+        result.errors.push(`Chave ${doc.id}: identificação incompleta; recuperação manual necessária.`);
         continue;
       }
 
@@ -1070,5 +1152,6 @@ export async function reconcilePendingOperations(
     result.errors.push(`Consulta a idempotency_keys falhou: ${err.message}`);
   }
 
+  result.success = result.success && result.errors.length === 0;
   return result;
 }

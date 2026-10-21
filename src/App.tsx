@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { AudioEngine } from "./components/AudioEngine";
 import { UserProfile, ChatMessage } from "./types";
-import { parseApiResponse, apiFetch } from "./api";
+import { parseApiResponse, apiFetch, generateIdempotencyKey } from "./api";
 
 // Import custom built components
 import PortalEntrance from "./components/PortalEntrance";
@@ -22,6 +22,43 @@ import UserProfilePanel from "./components/UserProfile";
 import PremiumCredits from "./components/PremiumCredits";
 import AdminPanel from "./components/AdminPanel";
 import LegalModal, { LegalTab } from "./components/LegalModal";
+
+type PendingConsultation = {
+  key: string;
+  userId: string;
+  firebaseUid: string;
+  text: string;
+  type: "comum" | "outros" | "completa";
+  createdAt: string;
+};
+
+type ChatApiResult = {
+  success?: boolean;
+  error?: string;
+  code?: string;
+  refunded?: boolean;
+  alreadyProcessed?: boolean;
+  exuMessage?: ChatMessage;
+  xpAwarded?: number;
+};
+
+const pendingStorageKey = (uid: string) => `exu_pending_consultation_v1:${uid}`;
+
+function readPendingConsultation(uid: string, userId: string): PendingConsultation | null {
+  const saved = sessionStorage.getItem(pendingStorageKey(uid));
+  if (!saved) return null;
+  const value = JSON.parse(saved) as PendingConsultation;
+  if (
+    !value || value.firebaseUid !== uid || value.userId !== userId ||
+    typeof value.key !== "string" || !/^[a-zA-Z0-9_-]{8,128}$/.test(value.key) ||
+    typeof value.text !== "string" || !value.text.trim() ||
+    !["comum", "outros", "completa"].includes(value.type) ||
+    typeof value.createdAt !== "string"
+  ) {
+    throw new Error("Não foi possível recuperar a consulta pendente. Entre em contato com o suporte antes de reenviar a pergunta.");
+  }
+  return value;
+}
 
 export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
@@ -48,7 +85,36 @@ const SESSION_KEY = "exu_responde_chat_session";
     setLegalModalOpen(true);
   };
 
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const lastMessageRef = useRef<HTMLDivElement>(null);
+  const sendingRef = useRef(false);
+  const requestRef = useRef<AbortController | null>(null);
+  const currentUserRef = useRef(user);
+  currentUserRef.current = user;
+  const [pendingConsultation, setPendingConsultation] = useState<PendingConsultation | null>(null);
+  const [pendingStorageError, setPendingStorageError] = useState("");
+
+  useEffect(() => {
+    setPendingConsultation(null);
+    setPendingStorageError("");
+    const uid = auth.currentUser?.uid;
+    if (uid && user?.id) {
+      try {
+        setPendingConsultation(readPendingConsultation(uid, user.id));
+      } catch (error) {
+        setPendingStorageError(error instanceof Error ? error.message : "Não foi possível acessar a consulta pendente.");
+      }
+    }
+    return () => {
+      requestRef.current?.abort();
+      requestRef.current = null;
+      sendingRef.current = false;
+    };
+  }, [user?.id]);
+
+  useEffect(() => {
+    setLoading(false);
+  }, [user?.id]);
 
   // Load user session
 
@@ -165,10 +231,20 @@ const SESSION_KEY = "exu_responde_chat_session";
     ]);
   };
 
-  // Scroll to bottom of chat
+  // Move somente a conversa. A resposta começa pelo início, sem seguir a rolagem do leitor.
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+    const container = chatContainerRef.current;
+    const lastMessage = messages[messages.length - 1];
+    if (!container || !lastMessage) return;
+    const frame = requestAnimationFrame(() => {
+      if (lastMessage.sender === "exu" && lastMessageRef.current) {
+        container.scrollTo({ top: Math.max(0, lastMessageRef.current.offsetTop - 12), behavior: "auto" });
+      } else {
+        container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [messages]);
 
   // Handle continuous Sound toggling
   const toggleSound = () => {
@@ -261,103 +337,172 @@ const SESSION_KEY = "exu_responde_chat_session";
     setUser(updatedUser);
   };
 
-  // Chat message engine
+  // Uma chave por consulta: a recuperação reutiliza pergunta, modalidade e chave originais.
   const handleSendMessage = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!inputText.trim()) return;
-
-    // Direct registration check if user is blank
-    if (!user) {
+    e?.preventDefault();
+    if (sendingRef.current || loading) return;
+    const account = user;
+    const firebaseUser = auth.currentUser;
+    if (!account || !firebaseUser) {
       setShowEntranceModal(true);
       return;
     }
 
-    // Credits checking
-    const requiredCredits = 5;
-    if (user.credits < requiredCredits) {
-      AudioEngine.playPortalSwoosh();
-      setActiveModal("credits");
+    let consultation: PendingConsultation;
+    let recovering = false;
+    try {
+      const saved = readPendingConsultation(firebaseUser.uid, account.id);
+      recovering = Boolean(saved);
+      if (saved) {
+        consultation = saved;
+      } else {
+        const question = inputText.trim();
+        if (!question) return;
+        if (question.length > 2000) {
+          setPendingStorageError("A pergunta deve ter no máximo 2.000 caracteres.");
+          return;
+        }
+        if (account.credits < 5) {
+          setActiveModal("credits");
+          return;
+        }
+        consultation = {
+          key: generateIdempotencyKey(),
+          userId: account.id,
+          firebaseUid: firebaseUser.uid,
+          text: question,
+          type: consultationType,
+          createdAt: new Date().toISOString(),
+        };
+        // Salva antes do envio para preservar a chave mesmo após atualizar esta aba.
+        sessionStorage.setItem(pendingStorageKey(firebaseUser.uid), JSON.stringify(consultation));
+      }
+    } catch (error) {
+      setPendingStorageError(error instanceof Error ? error.message : "O navegador não permitiu guardar a consulta. Nenhuma nova pergunta foi enviada.");
       return;
     }
 
-    const question = inputText;
-    setInputText("");
+    sendingRef.current = true;
     setLoading(true);
-    AudioEngine.playCrystalBell();
+    setPendingStorageError("");
+    setPendingConsultation(consultation);
+    setInputText("");
+    const controller = new AbortController();
+    requestRef.current = controller;
+    const timeout = setTimeout(() => controller.abort(), 70_000);
+    const isCurrentAccount = () =>
+      auth.currentUser?.uid === consultation.firebaseUid &&
+      currentUserRef.current?.id === consultation.userId &&
+      requestRef.current === controller;
 
-    // Create user message locally
-    const userMsg: ChatMessage = {
-      id: "usr_" + Date.now(),
-      userId: user.id,
-      sender: "user",
-      text: question,
-      timestamp: new Date().toISOString()
+    const clearPending = () => {
+      sessionStorage.removeItem(pendingStorageKey(consultation.firebaseUid));
+      if (isCurrentAccount()) setPendingConsultation(null);
     };
 
-    setMessages(prev => [...prev, userMsg]);
+    const showMessage = (text: string, id: string) => {
+      if (!isCurrentAccount()) return;
+      const message: ChatMessage = {
+        id, userId: account.id, sender: "exu", text,
+        timestamp: new Date().toISOString(),
+      };
+      setMessages(previous => [...previous.filter(item => item.id !== id), message]);
+    };
 
-    
-
+    if (!recovering) {
+      setMessages(previous => [...previous, {
+        id: `usr_${consultation.key}`,
+        userId: account.id,
+        sender: "user",
+        text: consultation.text,
+        timestamp: consultation.createdAt,
+      }]);
+    }
 
     try {
-      const firebaseUser = auth.currentUser;
-
-      if (!firebaseUser) {
-        throw new Error("Sua sessão expirou. Entre novamente.");
-      }
-
       const token = await firebaseUser.getIdToken();
-
-      const res = await apiFetch("/api/exu/chat", {
+      if (!isCurrentAccount() || controller.signal.aborted) return;
+      const response = await apiFetch("/api/exu/chat", {
         method: "POST",
         token,
+        idempotencyKey: consultation.key,
+        signal: controller.signal,
         body: JSON.stringify({
-          text: question,
-          type: consultationType
-        })
+          text: consultation.text,
+          type: consultation.type,
+          idempotencyKey: consultation.key,
+        }),
       });
+      const data = await parseApiResponse<ChatApiResult>(response);
+      if (!isCurrentAccount()) return;
 
-
-
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Ocorreu uma falha ao abrir a comunicação celestial.");
+      if (!response.ok) {
+        const terminalRefund = data.code === "KEY_ALREADY_REFUNDED";
+        // Esses status, na primeira tentativa, correspondem à rejeição antes do débito.
+        const rejectedBeforeDebit = !recovering && [401, 402, 403, 413, 422, 429].includes(response.status);
+        if (data.refunded === true || terminalRefund || rejectedBeforeDebit) {
+          clearPending();
+          setInputText(consultation.text);
+          showMessage(
+            data.error || "A solicitação não foi concluída. Confira sua conta antes de tentar novamente.",
+            `err_${consultation.key}`,
+          );
+        } else {
+          showMessage(
+            `${data.error || "Ainda não foi possível confirmar o resultado da consulta."} Use “Verificar consulta pendente” para consultar novamente com a mesma identificação.`,
+            `err_${consultation.key}`,
+          );
+        }
+      } else if (
+        data.success === false || !data.exuMessage ||
+        typeof data.exuMessage.text !== "string" || !data.exuMessage.text.trim()
+      ) {
+        throw new Error("O servidor não retornou uma resposta válida. A consulta foi mantida para verificação.");
+      } else {
+        const reply = data.exuMessage;
+        const answer: ChatMessage = {
+          ...reply,
+          id: reply.id || `exu_${consultation.key}`,
+          userId: account.id,
+          sender: "exu",
+          timestamp: reply.timestamp || new Date().toISOString(),
+          xpAwarded: Number.isFinite(data.xpAwarded) ? data.xpAwarded : 0,
+        };
+        setMessages(previous => [
+          ...previous.filter(item =>
+            item.id !== `err_${consultation.key}` &&
+            item.id !== answer.id &&
+            !(item.sender === "exu" && item.timestamp === answer.timestamp && item.text === answer.text)
+          ),
+          answer,
+        ]);
+        clearPending();
       }
 
-      const xpAwarded = Number(data.xpAwarded || 0);
-const creditCharged = Math.max(0, Number(user.credits || 0) - Number(data.creditsLeft || 0));
-
-const exuMessageWithMeta: ChatMessage = {
-  ...data.exuMessage,
-  xpAwarded,
-  creditCharged
-};
-
-// Add Exu reaction message
-setMessages(prev => [...prev, exuMessageWithMeta]);
-
-// Update client user
-setUser({
-  ...user,
-  credits: data.creditsLeft,
-  xp: user.xp + xpAwarded,
-  level: data.newLevel
-});
-
-    } catch (err: any) {
-      setMessages(prev => [
-        ...prev,
-        {
-          id: "err_" + Date.now(),
-          userId: user.id,
-          sender: "exu",
-          text: `⚠️ Alerta: ${err.message || 'Houve uma oscilação na ponte mística de comunicação. Seus créditos de Axé foram preservados.'}`,
-          timestamp: new Date().toISOString()
+      // Busca a conta atual: não reaplica saldo histórico nem soma XP de resposta repetida.
+      try {
+        const profileResponse = await apiFetch("/api/user/profile", { token, signal: controller.signal });
+        const profile = await parseApiResponse<{ user?: UserProfile }>(profileResponse);
+        if (profileResponse.ok && profile.user?.id === account.id && isCurrentAccount()) {
+          setUser(profile.user);
         }
-      ]);
+      } catch {
+        // A falha ao atualizar o perfil não descarta a resposta nem reenvia a consulta.
+      }
+    } catch (error) {
+      showMessage(
+        controller.signal.aborted
+          ? "O tempo de espera terminou, mas isso não confirma se a consulta foi concluída. Use “Verificar consulta pendente” para recuperar o resultado com a mesma identificação."
+          : `${error instanceof Error ? error.message : "A conexão foi interrompida."} Use “Verificar consulta pendente” antes de iniciar outra consulta.`,
+        `err_${consultation.key}`,
+      );
     } finally {
-      setLoading(false);
+      clearTimeout(timeout);
+      if (requestRef.current === controller) {
+        requestRef.current = null;
+        sendingRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
@@ -426,6 +571,13 @@ setUser({
           box-shadow: 0 0 15px rgba(239, 68, 68, 0.6);
           pointer-events: none;
         }
+        #chat_container {
+          scrollbar-width: auto;
+          scrollbar-color: #b45309 #18181b;
+        }
+        #chat_container::-webkit-scrollbar { width: 8px; }
+        #chat_container::-webkit-scrollbar-track { background: #18181b; }
+        #chat_container::-webkit-scrollbar-thumb { background: #b45309; border-radius: 9px; }
         /* Custom styled scrolls */
         .scrolling-pane::-webkit-scrollbar {
           width: 5px;
@@ -649,7 +801,7 @@ setUser({
 
 <div className="w-full max-w-3xl mt-4 sm:mt-6 flex flex-col h-[calc(100vh-320px)] min-h-[350px] sm:h-[480px] lg:h-[48vh] bg-zinc-950/40 border border-zinc-900/60 rounded-3xl p-3 sm:p-4 shadow-[0_20px_50px_rgba(0,0,0,0.92)] backdrop-blur-md relative z-10">
 
-          <div id="chat_container" className="flex-1 overflow-y-auto pr-1 space-y-4 scrolling-pane select-text">
+          <div id="chat_container" ref={chatContainerRef} className="relative flex-1 min-h-0 overflow-y-scroll pr-1 space-y-4 scrolling-pane select-text" style={{ scrollbarGutter: "stable", overflowAnchor: "none" }}>
             
             {/* Standard Welcome layout fallback or Message Logs */}
             {messages.length === 0 ? (
@@ -666,6 +818,7 @@ setUser({
                 return (
                   <div
                     key={uniqueKey}
+                    ref={index === messages.length - 1 ? lastMessageRef : null}
                     className={`flex gap-3 max-w-full sm:max-w-[90%] pb-1 ${isExu ? "mr-auto text-left" : "ml-auto flex-row-reverse text-right"}`}
                   >
                     {/* Small avatar circle */}
@@ -758,7 +911,7 @@ setUser({
               </div>
             )}
 
-            <div ref={chatEndRef} />
+            <div aria-hidden="true" />
           </div>
 
           {/* BARRA DE CAMINHOS - FLOATING KEY CONTROLLERS */}
@@ -848,12 +1001,32 @@ setUser({
 
           {/* CAMPO DE PERGUNTA GPT */}
           <div className="pt-2 border-t border-zinc-900">
+            {pendingStorageError && (
+              <p role="alert" className="mb-2 text-sm text-amber-200">{pendingStorageError}</p>
+            )}
+            {pendingConsultation?.userId === user?.id && pendingConsultation && (
+              <div className="mb-2 rounded-xl border border-amber-500/40 bg-black/80 p-3">
+                <p className="text-xs text-amber-100 mb-2">
+                  {loading ? "Aguardando a resposta da consulta…" : "Há uma consulta aguardando confirmação. Verifique o resultado antes de enviar outra pergunta."}
+                </p>
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={() => { void handleSendMessage(); }}
+                  className="rounded-lg border border-amber-500/60 px-3 py-2 text-sm text-amber-200 disabled:opacity-50"
+                >
+                  {loading ? "Aguarde…" : "Verificar consulta pendente"}
+                </button>
+              </div>
+            )}
             <form onSubmit={handleSendMessage} className="flex gap-2">
               <input
                 id="campo_pergunta_gpt"
                 type="text"
                 value={inputText}
-                disabled={loading}
+                disabled={loading || Boolean(pendingConsultation)}
+                maxLength={2000}
+                aria-label="Sua pergunta para Exu"
                 onChange={(e) => setInputText(e.target.value)}
                 placeholder={!user ? "Adicione sua pergunta..." : user.credits < 5 ? "Você precisa de pelo menos 5 créditos para esta pergunta..." : "Pergunte sobre sua vida, caminhos, Odu, numerologia, orixás, Exu, prosperidade ou espiritualidade..."}
                 className="flex-1 px-4.5 py-3.5 border border-zinc-900 bg-black/80 rounded-xl text-xs sm:text-sm text-yellow-50 placeholder-zinc-700 focus:outline-none focus:border-yellow-500/40 focus:ring-1 focus:ring-yellow-500/30 transition-all font-sans"
@@ -861,7 +1034,8 @@ setUser({
               <button
                 id="gpt_send_submit_btn"
                 type="submit"
-                disabled={loading || !inputText.trim()}
+                disabled={loading || Boolean(pendingConsultation) || !inputText.trim()}
+                aria-label="Enviar pergunta"
                 className="px-5 py-3.5 rounded-xl font-bold bg-gradient-to-r from-yellow-300 via-amber-400 to-amber-600 hover:from-yellow-250 hover:to-amber-500 text-black shadow-md hover:shadow-yellow-500/10 cursor-pointer active:scale-95 transition-all flex items-center justify-center shrink-0 disabled:opacity-40"
               >
                 <Send className="w-4 h-4 shrink-0" />

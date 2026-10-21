@@ -1,129 +1,119 @@
 import type express from "express";
 import crypto from "node:crypto";
+import { isIP } from "node:net";
 import { getApps } from "firebase-admin/app";
 
-// ======================================================
-// OBTENÇÃO SEGURA DE IP REAL (SEM CONFIAR CEGAMENTE EM SPOOFING)
-// ======================================================
-export function getClientIp(req: express.Request): string {
-  const xRealIp = req.headers["x-real-ip"];
-  if (typeof xRealIp === "string" && xRealIp.trim()) {
-    return xRealIp.trim();
-  }
-
-  const cfConnectingIp = req.headers["cf-connecting-ip"];
-  if (typeof cfConnectingIp === "string" && cfConnectingIp.trim()) {
-    return cfConnectingIp.trim();
-  }
-
-  const xForwardedFor = req.headers["x-forwarded-for"];
-  if (typeof xForwardedFor === "string" && xForwardedFor.trim()) {
-    const ips = xForwardedFor.split(",").map((ip) => ip.trim());
-    if (ips[0]) return ips[0];
-  }
-
-  return req.socket?.remoteAddress || req.ip || "127.0.0.1";
+function normalizedIp(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  let ip = value.trim();
+  if (ip.startsWith("::ffff:") && isIP(ip.slice(7)) === 4) ip = ip.slice(7);
+  return isIP(ip) ? ip.toLowerCase() : null;
 }
 
-// ======================================================
-// FIREBASE APP CHECK / ANTIBOT VERIFICATION OFICIAL
-// ======================================================
+// Só confia nos cabeçalhos encaminhados quando executado na infraestrutura Vercel.
+export function getClientIp(req: express.Request): string {
+  if (process.env.VERCEL === "1") {
+    for (const name of ["x-vercel-forwarded-for", "x-forwarded-for"]) {
+      const header = req.headers[name];
+      // Não aceita listas arbitrárias, portas, arrays ou valores que não sejam IP.
+      const ip = normalizedIp(header);
+      if (ip) return ip;
+    }
+  }
+  // Fora da Vercel, usa o par TCP. Um cliente não escolhe o próprio IP por header.
+  return normalizedIp(req.socket?.remoteAddress) || "unknown";
+}
+
 export async function verifyAppCheckToken(
   firebaseAdminApp: any,
   token?: string
 ): Promise<{ valid: boolean; decodedToken?: any; error?: string }> {
-  const isProd = process.env.NODE_ENV === "production" || process.env.VERCEL_ENV === "production";
-  const isEnforced = process.env.ENFORCE_APP_CHECK === "true";
-
-  if (!token || typeof token !== "string" || !token.trim()) {
-    return { valid: false, error: "Token App Check ausente" };
+  if (typeof token !== "string" || !token.trim()) {
+    return { valid: false, error: "Token App Check ausente." };
   }
-
   const cleanToken = token.trim();
-
-  // Mocks explícitos permitidos estritamente em ambiente de desenvolvimento e teste
-  if (!isProd && cleanToken.startsWith("mock-valid-app-check-token")) {
-    return { valid: true, decodedToken: { appId: "mock-dev-app-id", token: cleanToken } };
+  if (cleanToken.length > 16_384 || cleanToken.startsWith("mock-valid-app-check-token")) {
+    return { valid: false, error: "Token App Check inválido." };
+  }
+  if (!firebaseAdminApp) {
+    return { valid: false, error: "Serviço App Check indisponível." };
   }
 
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    let appCheckService: any = null;
-
-    if (firebaseAdminApp && typeof firebaseAdminApp.appCheck === "function") {
-      appCheckService = firebaseAdminApp.appCheck();
-    } else if (firebaseAdminApp) {
-      try {
-        const { getAppCheck } = await import("firebase-admin/app-check");
-        appCheckService = getAppCheck(firebaseAdminApp);
-      } catch (_importErr) {
-        appCheckService = null;
+    const verification = async () => {
+      const service = typeof firebaseAdminApp.appCheck === "function"
+        ? firebaseAdminApp.appCheck()
+        : (await import("firebase-admin/app-check")).getAppCheck(firebaseAdminApp);
+      if (!service || typeof service.verifyToken !== "function") {
+        throw new Error("Serviço indisponível");
       }
-    }
-
-    if (!appCheckService) {
-      // Em produção com proteção habilitada, não há aprovação automática por falta do método
-      if (isProd && isEnforced) {
-        return {
-          valid: false,
-          error: "Serviço App Check indisponível na infraestrutura do Firebase Admin em produção.",
-        };
+      // A validação criptográfica, projeto e expiração são conferidos pelo Admin SDK.
+      const decoded = await service.verifyToken(cleanToken);
+      if (!decoded || typeof decoded.appId !== "string" || !decoded.appId) {
+        throw new Error("Token sem appId");
       }
-      // Em desenvolvimento e teste sem enforcement, permite avanço informativo
-      if (!isProd && !isEnforced) {
-        return { valid: true, error: "Bypass de App Check em ambiente de desenvolvimento local." };
-      }
-      return { valid: false, error: "App Check não configurado adequadamente." };
-    }
-
-    const decodedToken = await appCheckService.verifyToken(cleanToken);
+      return decoded;
+    };
+    const decodedToken = await Promise.race([
+      verification(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Tempo limite App Check")), 8_000);
+      }),
+    ]);
     return { valid: true, decodedToken };
-  } catch (err: any) {
-    return { valid: false, error: err.message || "Token App Check inválido ou expirado." };
+  } catch {
+    // Não envia tokens, credenciais nem mensagens internas do SDK ao cliente/log.
+    return { valid: false, error: "Não foi possível validar o token App Check." };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
 export function createAppCheckMiddleware(getFirebaseApp?: any) {
-  const isEnforced = () => process.env.ENFORCE_APP_CHECK === "true";
-
+  let nextObservationLogAt = 0;
   return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    // Isenções estritas e específicas:
-    // 1. Health check público da infraestrutura
-    // 2. Webhook do Mercado Pago (protegido por assinatura HMAC-SHA256 oficial)
-    // 3. Endpoint do agendador Vercel Cron (protegido exclusivamente por CRON_SECRET Bearer token)
-    if (
-      req.path === "/api/health" ||
-      req.path.startsWith("/api/mercadopago/webhook") ||
-      req.path === "/api/cron/reconcile"
-    ) {
-      return next();
+    const path = req.path;
+    // O navegador precisa carregar o site antes de obter seu token App Check.
+    if (path !== "/api" && !path.startsWith("/api/")) return next();
+
+    const route = path.endsWith("/") ? path.slice(0, -1) : path;
+    const method = req.method.toUpperCase();
+    const isHealth = route === "/api/health" && ["GET", "HEAD"].includes(method);
+    const isWebhook = route === "/api/mercadopago/webhook" && method === "POST";
+    const isCron = route === "/api/cron/reconcile" && ["GET", "POST"].includes(method);
+    // Webhook e cron mantêm suas próprias verificações de assinatura e segredo.
+    if (isHealth || isWebhook || isCron) return next();
+
+    const enforced = process.env.ENFORCE_APP_CHECK?.trim().toLowerCase() === "true";
+    let result: { valid: boolean; decodedToken?: any; error?: string };
+    try {
+      const appInstance = typeof getFirebaseApp === "function"
+        ? await getFirebaseApp()
+        : getFirebaseApp || getApps()[0] || null;
+      const header = req.headers["x-firebase-appcheck"];
+      result = await verifyAppCheckToken(appInstance, typeof header === "string" ? header : undefined);
+    } catch {
+      result = { valid: false, error: "Inicialização do App Check indisponível." };
     }
-
-    const appInstance =
-      typeof getFirebaseApp === "function"
-        ? getFirebaseApp()
-        : getFirebaseApp || (getApps().length ? getApps()[0] : null);
-
-    const appCheckToken = req.headers["x-firebase-appcheck"] as string | undefined;
-    const result = await verifyAppCheckToken(appInstance, appCheckToken);
-
-    if (!result.valid) {
-      if (isEnforced()) {
-        return res.status(401).json({
-          error: "Requisição não autorizada pelo sistema antibot (App Check).",
-          code: "APP_CHECK_FAILED",
-        });
-      }
-      // Modo de rollout / observação: loga sem bloquear em dev/test
-      console.warn(`[APP-CHECK OBSERVE] ${req.method} ${req.path} - ${result.error}`);
+    if (result.valid) return next();
+    if (enforced) {
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(401).json({
+        error: "Requisição não autorizada pelo sistema antibot (App Check).",
+        code: "APP_CHECK_FAILED",
+      });
     }
-
+    // Preserva o rollout existente: sem ENFORCE_APP_CHECK=true, apenas observa.
+    // Observação não significa token validado, mesmo em produção.
+    if (Date.now() >= nextObservationLogAt) {
+      nextObservationLogAt = Date.now() + 30_000;
+      console.warn("[APP-CHECK OBSERVE] Validação não concluída; bloqueio desativado pela configuração.");
+    }
     return next();
   };
 }
 
-// ======================================================
-// AUDIT LOGGING MINIMIZADO (PROTEÇÃO CONTRA REJEIÇÃO POR UNDEFINED)
-// ======================================================
 export async function recordSecurityAudit(
   firestore: any,
   data: {
@@ -137,24 +127,19 @@ export async function recordSecurityAudit(
 ): Promise<void> {
   if (!firestore) return;
   try {
-    const hashedIp = data.ip
-      ? crypto.createHash("sha256").update(data.ip).digest("hex").substring(0, 16)
-      : null;
-
-    // Constrói objeto livre de propriedades undefined para evitar rejeição do Firestore
+    const ip = normalizedIp(data.ip);
     const auditDoc: Record<string, any> = {
-      type: data.type || "security_event",
-      userId: data.userId || "anonymous",
-      status: data.status || "success",
+      type: String(data.type || "security_event").slice(0, 100),
+      userId: String(data.userId || "anonymous").slice(0, 200),
+      status: ["success", "blocked", "failed"].includes(data.status || "") ? data.status : "success",
       timestamp: new Date().toISOString(),
     };
-
-    if (data.email) auditDoc.email = String(data.email).trim().toLowerCase();
-    if (hashedIp) auditDoc.ipHash = hashedIp;
+    if (data.email) auditDoc.email = String(data.email).trim().toLowerCase().slice(0, 254);
+    // Hash de IP continua sendo dado pseudonimizado, não anonimização garantida.
+    if (ip) auditDoc.ipHash = crypto.createHash("sha256").update(ip).digest("hex").substring(0, 16);
     if (data.details) auditDoc.details = String(data.details).substring(0, 500);
-
     await firestore.collection("security_logs").add(auditDoc);
-  } catch (err) {
-    console.error("[SECURITY] Falha ao registrar security log:", err);
+  } catch {
+    console.error("[SECURITY] Não foi possível gravar o registro de auditoria.");
   }
 }

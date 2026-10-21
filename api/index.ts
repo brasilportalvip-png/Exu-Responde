@@ -610,7 +610,7 @@ async function executeCreditRefundTransactional(params: {
 async function completeConsultationTransactional(params: {
   userId: string;
   source: CreditLedgerRecord["source"];
-  idempotencyKey?: string;
+  idempotencyKey: string;
   operationId: string;
   responsePayload: any;
 }): Promise<void> {
@@ -638,95 +638,87 @@ async function requireEmailVerified(
   return next();
 }
 
+// Identidade e vínculo são conferidos novamente dentro da transação.
+function portalAccountError(status: number, code: string, message: string) {
+  return Object.assign(new Error(message), { status, code });
+}
+
+function validateAuthenticatedPortalData(data: any, identity: DecodedIdToken) {
+  if (data.isBlocked) {
+    throw portalAccountError(403, "USER_BLOCKED", "Este perfil foi suspenso por medidas de segurança do terreiro.");
+  }
+  if (data.firebaseUid) {
+    if (data.firebaseUid !== identity.uid) {
+      throw portalAccountError(403, "UID_MISMATCH", "Esta conta está vinculada a outra identidade Firebase.");
+    }
+  } else {
+    const email = typeof identity.email === "string" ? identity.email.trim().toLowerCase() : "";
+    if (!identity.email_verified || !email || String(data.email || "").trim().toLowerCase() !== email) {
+      throw portalAccountError(403, "VERIFIED_EMAIL_REQUIRED", "Confirme seu e-mail antes de vincular esta conta ao portal.");
+    }
+  }
+}
+
+async function findAuthenticatedPortalRef(identity: DecodedIdToken) {
+  if (!identity?.uid) {
+    throw portalAccountError(401, "AUTH_REQUIRED", "Sessão Firebase inválida.");
+  }
+  let snapshot = await firestore.collection("users")
+    .where("firebaseUid", "==", identity.uid).limit(2).get();
+  if (snapshot.empty) {
+    const email = typeof identity.email === "string" ? identity.email.trim().toLowerCase() : "";
+    if (!identity.email_verified || !email) {
+      throw portalAccountError(403, "VERIFIED_EMAIL_REQUIRED", "Confirme seu e-mail antes de vincular esta conta ao portal.");
+    }
+    snapshot = await firestore.collection("users").where("email", "==", email).limit(2).get();
+  }
+  if (snapshot.empty) {
+    throw portalAccountError(404, "USER_PROFILE_NOT_FOUND", "Buscador não encontrado no portal. Complete seu cadastro.");
+  }
+  if (snapshot.docs.length !== 1) {
+    throw portalAccountError(409, "AMBIGUOUS_ACCOUNT", "Foram encontrados registros conflitantes da conta. Entre em contato com o suporte.");
+  }
+  return snapshot.docs[0].ref;
+}
+
+async function resolveAuthenticatedPortalAccount(identity: DecodedIdToken) {
+  const ref = await findAuthenticatedPortalRef(identity);
+  return firestore.runTransaction(async transaction => {
+    const snapshot = await transaction.get(ref);
+    if (!snapshot.exists) {
+      throw portalAccountError(404, "USER_PROFILE_NOT_FOUND", "Usuário não encontrado.");
+    }
+    const data = snapshot.data() || {};
+    validateAuthenticatedPortalData(data, identity);
+    if (!data.firebaseUid) {
+      transaction.update(ref, { firebaseUid: identity.uid, updatedAt: new Date().toISOString() });
+    }
+    // Não altera emailVerified aqui: a ativação do bônus é responsabilidade do login.
+    return { ...data, firebaseUid: identity.uid, id: snapshot.id, ref };
+  });
+}
+
+function sendPortalAccountError(res: express.Response, error: any) {
+  const expected = Number.isInteger(error?.status) && error.status >= 400 && error.status < 500;
+  if (!expected) console.error("[PORTAL ACCOUNT] Falha de banco ou processamento:", error);
+  return res.status(expected ? error.status : 503).json({
+    error: expected ? error.message : "Não foi possível atualizar sua conta com segurança. Tente novamente em instantes.",
+    code: expected ? error.code : "ACCOUNT_TEMPORARILY_UNAVAILABLE",
+  });
+}
+
 async function requirePortalUser(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction
 ) {
-  const firebaseUser =
-    (req as any).firebaseUser as DecodedIdToken | undefined;
-
-  if (!firebaseUser?.uid) {
-    return res.status(401).json({
-      error: "Sessão do usuário não identificada."
-    });
-  }
-
   try {
-    let userDoc: any = null;
-
-    // 1. Autoridade Exclusiva: Busca estrita por firebaseUid
-    const uidSnapshot = await firestore
-      .collection("users")
-      .where("firebaseUid", "==", firebaseUser.uid)
-      .limit(1)
-      .get();
-
-    if (!uidSnapshot.empty) {
-      userDoc = uidSnapshot.docs[0];
-    } else if (firebaseUser.email && firebaseUser.email_verified) {
-      // 2. Migração segura de contas legadas SOMENTE com e-mail confirmado correspondente
-      const emailSnapshot = await firestore
-        .collection("users")
-        .where("email", "==", firebaseUser.email.trim().toLowerCase())
-        .limit(1)
-        .get();
-
-      if (!emailSnapshot.empty) {
-        const potentialDoc = emailSnapshot.docs[0];
-        const potentialData = potentialDoc.data() || {};
-
-        if (!potentialData.firebaseUid) {
-          await firestore.runTransaction(async (transaction: any) => {
-            transaction.update(potentialDoc.ref, {
-              firebaseUid: firebaseUser.uid,
-              emailVerified: true,
-              updatedAt: new Date().toISOString()
-            });
-          });
-          userDoc = potentialDoc;
-        }
-      }
-    }
-
-    if (!userDoc || !userDoc.exists) {
-      return res.status(404).json({
-        error: "Buscador não encontrado no portal. Complete seu cadastro.",
-        code: "USER_PROFILE_NOT_FOUND"
-      });
-    }
-
-    const userData = userDoc.data() as any;
-
-    if (userData.isBlocked) {
-      return res.status(403).json({
-        error: "Esta conta está suspensa das práticas do terreiro.",
-        code: "USER_BLOCKED"
-      });
-    }
-
-    if (
-      userData?.firebaseUid &&
-      userData.firebaseUid !== firebaseUser.uid
-    ) {
-      return res.status(403).json({
-        error: "Esta sessão não pertence ao usuário informado.",
-        code: "UID_MISMATCH"
-      });
-    }
-
-    (req as any).portalUser = {
-      id: userDoc.id,
-      ref: userDoc.ref,
-      ...userData
-    };
-
+    (req as any).portalUser = await resolveAuthenticatedPortalAccount(
+      (req as any).firebaseUser as DecodedIdToken
+    );
     return next();
   } catch (error) {
-    console.error("[AUTH] Falha ao validar usuário do portal:", error);
-    return res.status(500).json({
-      error: "Falha de validação de perfil. Tente novamente."
-    });
+    return sendPortalAccountError(res, error);
   }
 }
 
@@ -2834,143 +2826,75 @@ Você DEVE estruturar o relatório obrigatoriamente utilizando Markdown com as s
 
 
 
-// Auth API - Login
-app.post(
-  "/api/auth/login",
-  requireFirebaseAuth,
-  async (req, res) => {
-    const firebaseUser =
-      (req as any).firebaseUser as DecodedIdToken;
-
-    const firebaseEmail =
-      typeof firebaseUser?.email === "string"
-        ? firebaseUser.email.trim().toLowerCase()
-        : "";
-
-    if (!firebaseUser?.uid || !firebaseEmail) {
-      return res.status(401).json({
-        error: "A identidade Firebase não pôde ser validada."
-      });
+// Auth API - Login: saldo e bônus protegidos por transação.
+app.post("/api/auth/login", requireFirebaseAuth, async (req, res) => {
+  try {
+    const identity = (req as any).firebaseUser as DecodedIdToken;
+    const email = typeof identity?.email === "string" ? identity.email.trim().toLowerCase() : "";
+    if (!identity?.uid || !email) {
+      throw portalAccountError(401, "AUTH_REQUIRED", "A identidade Firebase não pôde ser validada.");
+    }
+    if (!await checkDurableRateLimit(`login_${getClientIp(req)}`, 15, 15 * 60 * 1000)) {
+      throw portalAccountError(429, "LOGIN_RATE_LIMIT", "Muitas tentativas de login recentes. Por favor, aguarde alguns minutos.");
+    }
+    if (!identity.email_verified) {
+      throw portalAccountError(403, "VERIFIED_EMAIL_REQUIRED", "Confirme seu e-mail antes de entrar no portal.");
+    }
+    const submittedEmail = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    if (submittedEmail && submittedEmail !== email) {
+      throw portalAccountError(403, "EMAIL_MISMATCH", "O e-mail informado não corresponde à sessão autenticada.");
     }
 
-    const clientIp = getClientIp(req);
-
-    if (!await checkDurableRateLimit(`login_${clientIp}`, 15, 15 * 60 * 1000)) {
-      return res.status(429).json({
-        error: "Muitas tentativas de login recentes. Por favor, aguarde alguns minutos."
-      });
-    }
-
-    if (!firebaseUser.email_verified) {
-      return res.status(403).json({
-        error:
-          "Confirme seu e-mail antes de entrar no portal."
-      });
-    }
-
-    const submittedEmail =
-      typeof req.body?.email === "string"
-        ? req.body.email.trim().toLowerCase()
-        : "";
-
-    if (
-      submittedEmail &&
-      submittedEmail !== firebaseEmail
-    ) {
-      return res.status(403).json({
-        error:
-          "O e-mail informado não corresponde à sessão autenticada."
-      });
-    }
-
-    // Busca usuário primariamente por firebaseUid, depois por email
-    let snapshot = await firestore
-      .collection("users")
-      .where("firebaseUid", "==", firebaseUser.uid)
-      .limit(1)
-      .get();
-
-    if (snapshot.empty) {
-      snapshot = await firestore
-        .collection("users")
-        .where("email", "==", firebaseEmail)
-        .limit(1)
-        .get();
-    }
-
-    if (snapshot.empty) {
-      return res.status(404).json({
-        error:
-          "Este buscador não está cadastrado no portal."
-      });
-    }
-
-    const doc = snapshot.docs[0];
-    const userData = doc.data() as any;
-
-    if (userData.isBlocked) {
-      return res.status(403).json({
-        error: "Este perfil foi suspenso por medidas de segurança do terreiro."
-      });
-    }
-
-    if (userData.firebaseUid && userData.firebaseUid !== firebaseUser.uid) {
-      return res.status(403).json({
-        error:
-          "Esta conta está vinculada a outra identidade Firebase."
-      });
-    }
-
-    // Ativação de créditos promocionais se foi recém-verificado
-    let creditsToUpdate = Number(userData.credits || 0);
-    const wasUnverified = !userData.emailVerified;
-
-    if (
-      wasUnverified &&
-      !userData.promotionalCreditsBlocked &&
-      creditsToUpdate === 0
-    ) {
-      creditsToUpdate = 5;
-      await firestore
-        .collection("credit_ledger")
-        .doc("op_grant_verify_" + doc.id)
-        .set({
-          operationId: "op_grant_verify_" + doc.id,
-          userId: doc.id,
-          firebaseUid: firebaseUser.uid,
+    const userRef = await findAuthenticatedPortalRef(identity);
+    const grantRef = firestore.collection("credit_ledger").doc("op_grant_verify_" + userRef.id);
+    const registrationRef = firestore.collection("credit_ledger").doc("op_reg_" + userRef.id);
+    await firestore.runTransaction(async transaction => {
+      // Todas as leituras devem preceder qualquer escrita.
+      const userDoc = await transaction.get(userRef);
+      const grantDoc = await transaction.get(grantRef);
+      const registrationDoc = await transaction.get(registrationRef);
+      if (!userDoc.exists) {
+        throw portalAccountError(404, "USER_PROFILE_NOT_FOUND", "Usuário não encontrado.");
+      }
+      const data = userDoc.data() || {};
+      validateAuthenticatedPortalData(data, identity);
+      const now = new Date().toISOString();
+      const update: Record<string, any> = {
+        firebaseUid: identity.uid,
+        emailVerified: true,
+        updatedAt: now,
+      };
+      const credits = Number(data.credits ?? 0);
+      const eligible = !data.emailVerified && !data.promotionalCreditsBlocked &&
+        !grantDoc.exists && !registrationDoc.exists && credits === 0;
+      if (eligible) {
+        update.credits = 5;
+        transaction.set(grantRef, {
+          operationId: grantRef.id,
+          userId: userRef.id,
+          firebaseUid: identity.uid,
           type: "grant",
           amount: 5,
-          balanceBefore: 0,
+          balanceBefore: credits,
           balanceAfter: 5,
           status: "committed",
           source: "registration",
           reason: "Créditos promocionais concedidos após confirmação do e-mail",
-          createdAt: new Date().toISOString()
+          createdAt: now,
+          committedAt: now,
         });
-    }
-
-    await doc.ref.set(
-      {
-        firebaseUid: firebaseUser.uid,
-        emailVerified: true,
-        credits: creditsToUpdate,
-        updatedAt: new Date().toISOString()
-      },
-      { merge: true }
-    );
-
-    const refreshedDoc = await doc.ref.get();
-
-    return res.json({
-      success: true,
-      user: toPublicUserDTO(refreshedDoc.id, refreshedDoc.data() || {})
+      }
+      // Login normal nunca regrava saldo, XP ou nível.
+      transaction.update(userRef, update);
     });
+    const refreshed = await userRef.get();
+    if (!refreshed.exists) throw portalAccountError(404, "USER_PROFILE_NOT_FOUND", "Usuário não encontrado.");
+    validateAuthenticatedPortalData(refreshed.data() || {}, identity);
+    return res.json({ success: true, user: toPublicUserDTO(refreshed.id, refreshed.data() || {}) });
+  } catch (error) {
+    return sendPortalAccountError(res, error);
   }
-);
-
-
-
-
+});
 
 // Auth API - Password Reset / Forgot Password
 app.post(
@@ -3004,215 +2928,72 @@ app.post(
   }
 );
 
-// Load Current Profile
-app.get(
-  "/api/user/profile",
-  requireFirebaseAuth,
-  async (req, res) => {
-    const firebaseUser =
-      (req as any).firebaseUser as DecodedIdToken;
-
-    const firebaseEmail =
-      typeof firebaseUser?.email === "string"
-        ? firebaseUser.email.trim().toLowerCase()
-        : "";
-
-    if (!firebaseUser?.uid || !firebaseEmail) {
-      return res.status(401).json({
-        error: "A identidade Firebase não pôde ser validada."
-      });
-    }
-
-    // Primeiro procura pelo vínculo seguro com Firebase UID
-    let snapshot = await firestore
-      .collection("users")
-      .where("firebaseUid", "==", firebaseUser.uid)
-      .limit(1)
-      .get();
-
-    // Compatibilidade com contas antigas ainda não migradas
-    if (snapshot.empty) {
-      snapshot = await firestore
-        .collection("users")
-        .where("email", "==", firebaseEmail)
-        .limit(1)
-        .get();
-    }
-
-    if (snapshot.empty) {
-      return res.status(404).json({
-        error: "Buscador não encontrado."
-      });
-    }
-
-    const userDoc = snapshot.docs[0];
-    const userData = userDoc.data() as any;
-
-    if (
-      userData.firebaseUid &&
-      userData.firebaseUid !== firebaseUser.uid
-    ) {
-      return res.status(403).json({
-        error:
-          "Esta conta está vinculada a outra identidade Firebase."
-      });
-    }
-
-    // Migra conta antiga para o Firebase UID atual
-    if (!userData.firebaseUid) {
-      await userDoc.ref.set(
-        {
-          firebaseUid: firebaseUser.uid,
-          emailVerified: Boolean(firebaseUser.email_verified),
-          updatedAt: new Date().toISOString()
-        },
-        { merge: true }
-      );
-    }
-
-    const chats = await loadUserMessages(userDoc.id);
-
-    const refreshedUserDoc =
-      await userDoc.ref.get();
-
-    return res.json({
-      user: toPublicUserDTO(refreshedUserDoc.id, refreshedUserDoc.data() || {}),
-      chats
-    });
+// Load Current Profile: migração apenas com e-mail verificado e vínculo transacional.
+app.get("/api/user/profile", requireFirebaseAuth, async (req, res) => {
+  try {
+    const identity = (req as any).firebaseUser as DecodedIdToken;
+    const account = await resolveAuthenticatedPortalAccount(identity);
+    const chats = await loadUserMessages(account.id);
+    const snapshot = await account.ref.get();
+    if (!snapshot.exists) throw portalAccountError(404, "USER_PROFILE_NOT_FOUND", "Usuário não encontrado.");
+    validateAuthenticatedPortalData(snapshot.data() || {}, identity);
+    return res.json({ user: toPublicUserDTO(snapshot.id, snapshot.data() || {}), chats });
+  } catch (error) {
+    return sendPortalAccountError(res, error);
   }
-);
+});
 
-
-
-
-// Update Birth details
-app.post(
-  "/api/user/update",
-  requireFirebaseAuth,
-  async (req, res) => {
-    const parseResult = userUpdateSchema.safeParse(req.body);
-    if (!parseResult.success) {
-      return res.status(400).json({
-        error: parseResult.error.issues[0]?.message || "Dados de atualização inválidos."
-      });
-    }
-
-    const firebaseUser =
-      (req as any).firebaseUser as DecodedIdToken;
-
-    const {
-      birthName,
-      birthDate,
-      birthTime,
-      birthPlace,
-      name
-    } = parseResult.data;
-
-    if (!firebaseUser?.uid) {
-      return res.status(401).json({
-        error: "Sessão Firebase inválida."
-      });
-    }
-
-    let snapshot = await firestore
-      .collection("users")
-      .where("firebaseUid", "==", firebaseUser.uid)
-      .limit(1)
-      .get();
-
-    // Compatibilidade com contas antigas
-    if (
-      snapshot.empty &&
-      typeof firebaseUser.email === "string"
-    ) {
-      snapshot = await firestore
-        .collection("users")
-        .where(
-          "email",
-          "==",
-          firebaseUser.email.trim().toLowerCase()
-        )
-        .limit(1)
-        .get();
-    }
-
-    if (snapshot.empty) {
-      return res.status(404).json({
-        error: "Usuário não encontrado."
-      });
-    }
-
-    const userDocRef = snapshot.docs[0].ref;
-    const userDoc = await userDocRef.get();
-
-    const currentUser = {
-      id: userDoc.id,
-      ...userDoc.data()
-    } as any;
-
-    if (
-      currentUser.firebaseUid &&
-      currentUser.firebaseUid !== firebaseUser.uid
-    ) {
-      return res.status(403).json({
-        error:
-          "Esta conta está vinculada a outra identidade Firebase."
-      });
-    }
-
-    const nameToUse = (name ? name.trim() : (currentUser.name || "")).substring(0, 100);
-    const birthNameToUse = birthName !== undefined ? birthName.trim() : (currentUser.birthName || nameToUse);
-    const birthDateToUse = birthDate !== undefined ? birthDate.trim() : (currentUser.birthDate || "");
-    const birthTimeToUse = birthTime !== undefined ? birthTime.trim() : (currentUser.birthTime || "");
-    const birthPlaceToUse = birthPlace !== undefined ? birthPlace.trim() : (currentUser.birthPlace || "");
-
-    const natalChanged =
-      birthNameToUse !== (currentUser.birthName || "") ||
-      birthDateToUse !== (currentUser.birthDate || "") ||
-      birthTimeToUse !== (currentUser.birthTime || "") ||
-      birthPlaceToUse !== (currentUser.birthPlace || "");
-
-    let spiritualProps = {};
-    if (natalChanged && birthNameToUse && birthDateToUse) {
-      spiritualProps = calculateSpiritualProfile(
-        birthNameToUse,
-        birthDateToUse,
-        birthTimeToUse,
-        birthPlaceToUse
-      );
-    }
-
-    const updatedUser = {
-      ...currentUser,
-      firebaseUid: firebaseUser.uid,
-      name: nameToUse || currentUser.name,
-      birthName: birthNameToUse,
-      birthDate: birthDateToUse,
-      birthTime: birthTimeToUse,
-      birthPlace: birthPlaceToUse,
-      ...spiritualProps,
-      updatedAt: new Date().toISOString()
-    };
-
-    await userDocRef.set(
-      updatedUser,
-      { merge: true }
-    );
-
-    await firestore.collection("activity_logs").add({
-      userId: userDoc.id,
-      action: "Atualização de Identidade",
-      details:
-        "Recálculo do perfil astrológico e numerológico ancestral concluído com sucesso.",
-      timestamp: new Date().toISOString()
-    });
-
-    return res.json({
-      success: true,
-      user: toPublicUserDTO(userDoc.id, updatedUser)
-    });
+// Update Birth details: altera somente campos do perfil, sem regravar saldo ou permissões.
+app.post("/api/user/update", requireFirebaseAuth, async (req, res) => {
+  const parsed = userUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0]?.message || "Dados de atualização inválidos." });
   }
-);
+  try {
+    const identity = (req as any).firebaseUser as DecodedIdToken;
+    const userRef = await findAuthenticatedPortalRef(identity);
+    await firestore.runTransaction(async transaction => {
+      const snapshot = await transaction.get(userRef);
+      if (!snapshot.exists) throw portalAccountError(404, "USER_PROFILE_NOT_FOUND", "Usuário não encontrado.");
+      const current = snapshot.data() || {};
+      validateAuthenticatedPortalData(current, identity);
+      const update: Record<string, any> = {};
+      // Alguns schemas possuem defaults: ausência no pedido não deve apagar dados existentes.
+      const editableFields = ["name", "birthName", "birthDate", "birthTime", "birthPlace"] as const;
+      for (const field of editableFields) {
+        if (Object.prototype.hasOwnProperty.call(req.body, field) && parsed.data[field] !== undefined) {
+          update[field] = parsed.data[field];
+        }
+      }
+      const natalFields = ["birthName", "birthDate", "birthTime", "birthPlace"] as const;
+      const changed = natalFields.some(field => field in update && update[field] !== (current[field] || ""));
+      const next = { ...current, ...update };
+      if (changed && next.birthName && next.birthDate) {
+        Object.assign(update, calculateSpiritualProfile(next.birthName, next.birthDate, next.birthTime || "", next.birthPlace || ""));
+      }
+      if (!current.firebaseUid) update.firebaseUid = identity.uid;
+      update.updatedAt = new Date().toISOString();
+      transaction.update(userRef, update);
+    });
+    // Auditoria secundária: sua falha não transforma uma atualização concluída em erro.
+    try {
+      await firestore.collection("activity_logs").add({
+        userId: userRef.id,
+        action: "Atualização de Identidade",
+        details: "Atualização dos dados de perfil concluída com sucesso.",
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.warn("[PROFILE] Falha secundária na auditoria:", error);
+    }
+    const refreshed = await userRef.get();
+    if (!refreshed.exists) throw portalAccountError(404, "USER_PROFILE_NOT_FOUND", "Usuário não encontrado.");
+    validateAuthenticatedPortalData(refreshed.data() || {}, identity);
+    return res.json({ success: true, user: toPublicUserDTO(refreshed.id, refreshed.data() || {}) });
+  } catch (error) {
+    return sendPortalAccountError(res, error);
+  }
+});
 
 
 
