@@ -8,6 +8,8 @@ import { motion, AnimatePresence } from "motion/react";
 import { Send, Sparkles, MessageSquare, Compass, Shield, Flame, BookOpen, Volume2 } from "lucide-react";
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, ChatMessage } from "../types";
+import { auth } from "../firebase";
+import { apiFetch, generateIdempotencyKey } from "../api";
 
 interface TerreiroChatProps {
   user: UserProfile;
@@ -77,13 +79,19 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
     setMessages(prev => [...prev, userMsg]);
 
     try {
-      const res = await fetch("/api/exu/chat", {
+      const firebaseUser = auth.currentUser;
+      const token = firebaseUser ? await firebaseUser.getIdToken() : "";
+      const idempotencyKey = generateIdempotencyKey();
+
+      const res = await apiFetch("/api/exu/chat", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-user-id": user.id
-        },
-        body: JSON.stringify({ text: textToSend, type: consultationType })
+        token,
+        idempotencyKey,
+        body: JSON.stringify({
+          text: textToSend,
+          type: consultationType,
+          idempotencyKey,
+        })
       });
 
       const data = await res.json();
@@ -99,9 +107,9 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
       // Deduct client credit & add XP
       onUpdateUser({
         ...user,
-        credits: data.creditsLeft,
-        xp: user.xp + (data.xpAwarded || 15),
-        level: data.newLevel
+        credits: data.creditsLeft ?? user.credits,
+        xp: user.xp + (data.xpAwarded || 0),
+        level: data.newLevel || user.level
       });
 
     } catch (err: any) {
@@ -205,13 +213,14 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
 
         {/* Message items */}
         <AnimatePresence initial={false}>
-          {messages.map((msg) => {
+          {messages.map((msg, index) => {
             const isExu = msg.sender === "exu";
             const isFavorite = favorites.includes(msg.id);
+            const uniqueKey = `${msg.id || "chat"}-${msg.timestamp || ""}-${index}`;
 
             return (
               <motion.div
-                key={msg.id}
+                key={uniqueKey}
                 initial={{ opacity: 0, y: 15 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.5 }}
@@ -223,10 +232,9 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
                 }`}>
                   {isExu ? (
                     <img 
-                      src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/ChatGPT-Image-29-de-mai.-de-2026-09_27_07.png" 
+                      src="/images/Exu Responde Logo.png" 
                       alt="Exu Responde" 
                       className="w-full h-full object-cover" 
-                      referrerPolicy="no-referrer"
                     />
                   ) : (
                     "🕊️"
@@ -277,10 +285,9 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
           <div className="flex gap-3 justify-start mr-auto max-w-[80%]">
             <div className="w-8 h-8 rounded-full bg-black border border-red-900/40 text-yellow-500 flex items-center justify-center shrink-0 animate-pulse text-xs font-mono overflow-hidden">
               <img 
-                src="https://portalvipbrasil.com.br/wp-content/uploads/2026/05/ChatGPT-Image-29-de-mai.-de-2026-09_27_07.png" 
+                src="/images/Exu Responde Logo.png" 
                 alt="Exu Responde" 
                 className="w-full h-full object-cover" 
-                referrerPolicy="no-referrer"
               />
             </div>
             <div className="bg-zinc-900/60 border border-zinc-800 p-4 rounded-2xl rounded-tl-none flex items-center gap-1.5 shadow-md">
@@ -301,7 +308,7 @@ export default function TerreiroChat({ user, initialChats = [], onUpdateUser, op
         <div className="flex gap-2 overflow-x-auto pb-1.5 select-none scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
           {TEMPLE_SUGGESTIONS.map((sug, idx) => (
             <button
-              key={idx}
+              key={`temple_sug_${idx}`}
               onClick={() => handleSuggestionClick(sug)}
               disabled={loading}
               className="text-xs bg-zinc-950 hover:bg-red-950/20 border border-red-950 px-3 py-1.5 rounded-lg text-amber-200/80 hover:text-amber-100 hover:border-yellow-600/40 shrink-0 select-none cursor-pointer transition-all duration-300 disabled:opacity-50"

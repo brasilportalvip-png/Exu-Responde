@@ -1,0 +1,43 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: "npm"
+
+      - name: Setup Java 21 for Firestore Emulator
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install dependencies (clean)
+        run: npm ci
+
+      - name: Security audit
+        run: npm audit --omit=dev
+
+      - name: Lint and typecheck
+        run: npm run lint
+
+      - name: Run automated test suite
+        run: npm test
+
+      - name: Build production bundle
+        run: npm run build
+

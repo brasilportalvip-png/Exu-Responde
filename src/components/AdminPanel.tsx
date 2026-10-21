@@ -9,6 +9,7 @@ import { Users, BarChart3, BookOpen, Settings, Plus, Key, Terminal, RefreshCw, L
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, KnowledgeItem } from "../types";
 import { auth } from "../firebase";
+import { apiFetch } from "../api";
 
 interface AdminPanelProps {
   user: UserProfile;
@@ -41,50 +42,30 @@ export default function AdminPanel({ user }: AdminPanelProps) {
 
     try {
       const firebaseUser = auth.currentUser;
-
       if (!firebaseUser) {
         throw new Error(
           "Sua sessão expirou. Entre novamente para acessar o painel administrativo."
         );
       }
 
-      const token = await firebaseUser.getIdToken();
-
-      const hds = {
-        "Authorization": `Bearer ${token}`,
-        "x-user-id": user.id
-      };
-
-      const statsRes = await fetch("/api/admin/analytics", {
-        headers: hds
-      });
-
+      const statsRes = await apiFetch("/api/admin/analytics");
       const statsObj = await statsRes.json();
-
       if (!statsRes.ok) {
         throw new Error(
           statsObj.error || "Falha ao carregar analytics."
         );
       }
 
-      const usersRes = await fetch("/api/admin/users", {
-        headers: hds
-      });
-
+      const usersRes = await apiFetch("/api/admin/users");
       const usersObj = await usersRes.json();
-
       if (!usersRes.ok) {
         throw new Error(
           usersObj.error || "Falha ao carregar usuários."
         );
       }
 
-      const libRes = await fetch("/api/admin/library", {
-        headers: hds
-      });
-
+      const libRes = await apiFetch("/api/admin/library");
       const libObj = await libRes.json();
-
       if (!libRes.ok) {
         throw new Error(
           libObj.error || "Falha ao carregar biblioteca."
@@ -121,21 +102,16 @@ export default function AdminPanel({ user }: AdminPanelProps) {
 
     try {
       const firebaseUser = auth.currentUser;
-
       if (!firebaseUser) {
         throw new Error(
           "Sua sessão expirou. Entre novamente para alterar a biblioteca."
         );
       }
 
-      const token = await firebaseUser.getIdToken();
-
-      const res = await fetch("/api/admin/library/add", {
+      const res = await apiFetch("/api/admin/library/add", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
-          "x-user-id": user.id
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
           title: kbTitle,
@@ -381,8 +357,8 @@ export default function AdminPanel({ user }: AdminPanelProps) {
             <h3 className="text-xs font-mono font-bold text-yellow-500 uppercase tracking-widest border-b border-zinc-900 pb-2 mb-3">Biblioteca Ativa do Oráculo ({libraryData.length} registros)</h3>
             
             <div className="flex-1 overflow-y-auto space-y-3.5 scrollbar-thin scrollbar-thumb-zinc-900 pr-1">
-              {libraryData.map((item) => (
-                <div key={item.id} className="p-3 bg-black border border-zinc-900 rounded-lg">
+              {libraryData.map((item, itemIdx) => (
+                <div key={`kb_${item.id || itemIdx}_${itemIdx}`} className="p-3 bg-black border border-zinc-900 rounded-lg">
                   <div className="flex justify-between items-center mb-1">
                     <strong className="text-amber-100 text-xs font-bold font-sans uppercase">{item.title}</strong>
                     <span className="text-[8.5px] font-mono px-2 py-0.5 rounded bg-red-950/20 text-red-500 border border-red-900/30 uppercase font-bold">
@@ -393,7 +369,7 @@ export default function AdminPanel({ user }: AdminPanelProps) {
                   
                   <div className="mt-2 flex flex-wrap gap-1">
                     {item.tags.map((tg, idx) => (
-                      <span key={idx} className="text-[8.5px] font-mono text-zinc-500 select-none bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800">
+                      <span key={`tag_${item.id || itemIdx}_${idx}_${tg}`} className="text-[8.5px] font-mono text-zinc-500 select-none bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800">
                         #{tg}
                       </span>
                     ))}
@@ -423,8 +399,8 @@ export default function AdminPanel({ user }: AdminPanelProps) {
                 </tr>
               </thead>
               <tbody>
-                {registrations.map((seeker) => (
-                  <tr key={seeker.id} className="border-b border-zinc-900/40 hover:bg-zinc-900/10">
+                {registrations.map((seeker, sIdx) => (
+                  <tr key={`seeker_${seeker.id || seeker.email || sIdx}_${sIdx}`} className="border-b border-zinc-900/40 hover:bg-zinc-900/10">
                     <td className="py-3 font-bold text-amber-200">{seeker.name}</td>
                     <td className="text-zinc-500">{seeker.email}</td>
                     <td className="uppercase">{seeker.role}</td>
@@ -445,8 +421,8 @@ export default function AdminPanel({ user }: AdminPanelProps) {
           <h3 className="text-xs font-mono font-bold text-yellow-500 uppercase tracking-widest border-b border-zinc-900 pb-2 mb-3">Logs do Servidor / Transações Espirituais</h3>
           
           <div className="flex-1 overflow-y-auto space-y-2.5 font-mono text-[10.5px] text-zinc-400">
-            {logs.map((log) => (
-              <div key={log.id} className="p-2.5 bg-black border border-zinc-900 rounded-lg flex flex-col sm:flex-row justify-between gap-1.5 hover:border-yellow-500/10 transition-all">
+            {logs.map((log, lIdx) => (
+              <div key={`log_${log.id || lIdx}_${lIdx}`} className="p-2.5 bg-black border border-zinc-900 rounded-lg flex flex-col sm:flex-row justify-between gap-1.5 hover:border-yellow-500/10 transition-all">
                 <div className="space-y-0.5">
                   <div className="flex items-center gap-2">
                     <span className="text-red-500 uppercase font-bold text-[9px]">{log.action}</span>

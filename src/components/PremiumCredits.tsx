@@ -3,6 +3,7 @@ import { Coins, Gift } from "lucide-react";
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile, CreditPlan } from "../types";
 import { auth } from "../firebase";
+import { apiFetch } from "../api";
 
 interface PremiumCreditsProps {
   user: UserProfile;
@@ -32,9 +33,11 @@ const CREDIT_PLANS: CreditPlan[] = [
 
 export default function PremiumCredits({ user }: PremiumCreditsProps) {
   const [loadingPlanId, setLoadingPlanId] = useState<string | null>(null);
+  const [checkoutError, setCheckoutError] = useState<string>("");
 
   const checkoutPlan = async (plan: CreditPlan) => {
     setLoadingPlanId(plan.id);
+    setCheckoutError("");
     AudioEngine.playCrystalBell();
 
     try {
@@ -48,16 +51,9 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
 
       const token = await firebaseUser.getIdToken();
 
-      const res = await fetch("/api/credits/buy", {
+      const res = await apiFetch("/api/credits/buy", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
-
-          // Compatibilidade temporária com a rota atual do server.ts.
-          // Será removido quando a proteção consolidada do backend for aplicada.
-          "x-user-id": user.id
-        },
+        token,
         body: JSON.stringify({
           planId: plan.id,
           paymentMethod: "pix"
@@ -81,7 +77,7 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
         "Checkout Mercado Pago não retornou URL."
       );
     } catch (e: any) {
-      alert(
+      setCheckoutError(
         "Erro ao criar pagamento: " +
           (e?.message || "Falha desconhecida.")
       );
@@ -111,10 +107,16 @@ export default function PremiumCredits({ user }: PremiumCreditsProps) {
         </p>
       </div>
 
+      {checkoutError && (
+        <div className="max-w-xl mx-auto p-3 bg-red-950/40 border border-red-900/50 rounded-xl text-red-400 text-xs font-mono text-center">
+          ⚠️ {checkoutError}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-3xl mx-auto">
-        {CREDIT_PLANS.map((plan) => (
+        {CREDIT_PLANS.map((plan, pIdx) => (
           <div
-            key={plan.id}
+            key={`credit_plan_${plan.id}_${pIdx}`}
             className={`relative rounded-3xl border flex flex-col justify-between overflow-hidden p-6 transition-all duration-300 backdrop-blur-md ${
               plan.popular
                 ? "bg-gradient-to-b from-red-950/40 via-zinc-950 to-zinc-950 border-yellow-500/50 shadow-[0_10px_30px_rgba(234,179,8,0.12)] scale-102 lg:scale-105"

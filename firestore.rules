@@ -1,0 +1,72 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // DENY ALL por padrão para máxima segurança
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Regras da Coleção de Usuários
+    // Todas as mutações e deduções de créditos são efetuadas com segurança pela API do servidor
+    match /users/{userId} {
+      // O próprio usuário autenticado pode ler seu próprio documento
+      allow read: if request.auth != null && (
+        request.auth.uid == resource.data.firebaseUid || request.auth.uid == userId
+      );
+
+      // Nenhuma escrita direta pelo cliente. Todas as alterações passam pela API do backend.
+      allow write: if false;
+    }
+
+    // Livro-Razão de Créditos (Transacional / Imutável) - Exclusivo do Servidor
+    match /credit_ledger/{entry} {
+      allow read, write: if false;
+    }
+
+    // Regras de Mensagens / Consultas - Servidas com segurança exclusiva pela API do backend
+    match /messages/{messageId} {
+      allow read, write: if false;
+    }
+
+    // Pedidos do Mercado Pago (Servidor autoritário)
+    match /orders/{orderId} {
+      allow read, write: if false;
+    }
+
+    // Acervo de Sabedoria / Biblioteca / RAG
+    match /knowledge/{itemId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Coleções Críticas: Exclusivas do Servidor (Firebase Admin SDK)
+    match /payments/{paymentId} {
+      allow read, write: if false;
+    }
+
+    match /webhook_logs/{logId} {
+      allow read, write: if false;
+    }
+
+    match /webhook_errors/{errorId} {
+      allow read, write: if false;
+    }
+
+    match /activity_logs/{logId} {
+      allow read, write: if false;
+    }
+
+    match /security_logs/{logId} {
+      allow read, write: if false;
+    }
+
+    match /idempotency_keys/{keyId} {
+      allow read, write: if false;
+    }
+
+    match /rate_limits/{limitId} {
+      allow read, write: if false;
+    }
+  }
+}

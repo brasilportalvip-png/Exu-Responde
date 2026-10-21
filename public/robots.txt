@@ -1,4 +1,7 @@
 User-agent: *
 Allow: /
+Disallow: /api/
+Disallow: /api/admin/
 
+# Sitemap canônico de indexação
 Sitemap: https://exu-responde.vercel.app/sitemap.xml

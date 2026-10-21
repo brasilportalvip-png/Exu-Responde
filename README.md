@@ -28,9 +28,16 @@ Cadastre as variáveis abaixo em **Settings → Environment Variables** para Pro
 - `FIREBASE_PRIVATE_KEY`
 - `GEMINI_API_KEY`
 - `MERCADO_PAGO_ACCESS_TOKEN`
+- `MERCADO_PAGO_WEBHOOK_SECRET`
 - `APP_URL` — em produção: `https://exu-responde.vercel.app`
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM`, `ADMIN_SALES_EMAIL` — disparo de confirmação de Axé e outbox
+- `ENFORCE_APP_CHECK` — modo estrito antibot ("true" ou "false")
 
 As três variáveis `FIREBASE_*` devem vir da mesma conta de serviço do projeto Firebase `exu-responde`. A chave privada pode ser colada com quebras de linha reais ou com `\n`.
+
+## Política Financeira e Estornos
+- **Compras financeiras:** estorno monetário nunca é automático; requer solicitação do titular e análise manual administrativa via suporte.
+- **Falhas de consulta técnica (IA/timeout):** créditos debitados são estornados de imediato e automaticamente no saldo do usuário.
 
 Depois de alterar variáveis na Vercel, faça um novo deployment. Confirme a inicialização da API acessando:
 

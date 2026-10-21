@@ -8,9 +8,18 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "build:test-api": "esbuild api/index.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist/api.test.cjs",
     "start": "node dist/server.cjs",
-    "clean": "rm -rf dist db.json",
+    "clean": "node scripts/clean.js",
     "lint": "tsc --noEmit",
-    "test": "npm run build:test-api && node --no-experimental-require-module --test test/*.test.mjs"
+    "test:unit": "node --no-experimental-require-module --test test/api-startup.test.mjs test/consultation-consistency.test.mjs test/intent.test.mjs test/mercadopago-webhook.test.mjs test/spiritual-profile.test.mjs",
+    "test:emulator": "firebase emulators:exec --only firestore --project demo-exu-responde \"node --no-experimental-require-module --test test/emulator-consultation-consistency.test.mjs\"",
+    "test": "npm run build:test-api && npm run test:unit && npm run test:emulator"
+  },
+  "engines": {
+    "node": "^22.0.0 || ^24.0.0"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.5",
+    "uuid": "^11.1.1"
   },
   "dependencies": {
     "@google/genai": "^2.18.0",
@@ -23,15 +32,19 @@
     "lucide-react": "^0.546.0",
     "mercadopago": "^3.4.0",
     "motion": "^12.43.0",
+    "nodemailer": "^10.0.14",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "vite": "^6.4.3"
+    "vite": "^6.4.3",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^22.20.1",
+    "@types/nodemailer": "^8.0.2",
     "autoprefixer": "^10.5.4",
     "esbuild": "^0.25.0",
+    "firebase-tools": "^15.34.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.23.12",
     "typescript": "~5.8.2",

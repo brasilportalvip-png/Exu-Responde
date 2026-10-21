@@ -4,18 +4,19 @@
  */
 
 import {
+  auth,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   sendEmailVerification,
   sendPasswordResetEmail
-} from "firebase/auth";
-import { auth } from "../firebase";
+} from "../firebase";
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Sparkles, CheckCircle, Compass, LogIn, Volume2, VolumeX, Flame, User, Mail, Calendar, Clock, MapPin, Lock, Eye, EyeOff } from "lucide-react";
+import { Sparkles, CheckCircle, Compass, LogIn, Volume2, VolumeX, Flame, User, Mail, Calendar, Clock, MapPin, Lock, Eye, EyeOff, ShieldCheck, FileText } from "lucide-react";
 import { AudioEngine } from "./AudioEngine";
 import { UserProfile } from "../types";
-import { parseApiResponse } from "../api";
+import { parseApiResponse, apiFetch } from "../api";
+import LegalModal, { LegalTab } from "./LegalModal";
 
 interface PortalEntranceProps {
   onLoginSuccess: (user: UserProfile) => void;
@@ -27,9 +28,15 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  
 
-  
+  // Legal Modal states
+  const [legalModalOpen, setLegalModalOpen] = useState(false);
+  const [legalModalTab, setLegalModalTab] = useState<LegalTab>("termos");
+
+  const openLegal = (tab: LegalTab) => {
+    setLegalModalTab(tab);
+    setLegalModalOpen(true);
+  };
 
   // Form states
   const [birthName, setBirthName] = useState("");
@@ -39,10 +46,14 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
+  // Consent states
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const [ageConfirmed, setAgeConfirmed] = useState(false);
+
   // Anti-abuse security & verification states
   const [honeypot, setHoneypot] = useState("");
-  const [captchaAnswer, setCaptchaAnswer] = useState("");
-   const [sessionSign, setSessionSign] = useState("");
+  const [sessionSign, setSessionSign] = useState("");
 
   // Generate device Fingerprint tracking
   const getDeviceFingerprint = () => {
@@ -96,9 +107,9 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
       return;
     }
 
-    if (!captchaAnswer || parseInt(captchaAnswer) !== 7) {
+    if (!termsAccepted || !privacyAccepted || !ageConfirmed) {
       setError(
-        "A resposta do desafio antibot está incorreta. Quanto é 4 + 3?"
+        "É obrigatório confirmar ser maior de 18 anos e aceitar expressamente os Termos de Uso e a Política de Privacidade."
       );
       return;
     }
@@ -120,12 +131,9 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
       const firebaseUser = firebaseCredential.user;
       const token = await firebaseUser.getIdToken();
 
-      const backendRes = await fetch("/api/auth/register", {
+      const backendRes = await apiFetch("/api/auth/register", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           birthName,
           birthDate,
@@ -135,9 +143,12 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
           deviceId: getDeviceFingerprint(),
           browser: navigator.userAgent,
           session: sessionSign,
-          captchaAnswer,
-          honeypot
-        })
+          honeypot,
+          termsAccepted: true,
+          privacyAccepted: true,
+          termsVersion: "1.0",
+          privacyVersion: "1.0",
+        }),
       });
 
             const backendData = await parseApiResponse<{
@@ -224,12 +235,9 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
 
       const token = await firebaseUser.getIdToken(true);
 
-      const backendRes = await fetch("/api/auth/login", {
+      const backendRes = await apiFetch("/api/auth/login", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           email: firebaseUser.email
         })
@@ -350,12 +358,9 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
 
       const token = await firebaseUser.getIdToken(true);
 
-      const backendRes = await fetch("/api/auth/login", {
+      const backendRes = await apiFetch("/api/auth/login", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
+        token,
         body: JSON.stringify({
           email: firebaseUser.email
         })
@@ -645,24 +650,71 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
                   />
                 </div>
 
-                {/* Interactive Mathematical Anti-bot Captcha */}
-                <div className="mt-4 p-3 bg-red-950/20 rounded-xl border border-red-950/45 text-left">
-                  <label className="block text-[10px] font-mono font-bold tracking-widest text-zinc-300 uppercase mb-1.5 flex items-center gap-1.5">
-                    🛡️ Desafio de Segurança (Anti-robô)
-                  </label>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-xs font-mono text-zinc-400">Quanto é 4 + 3?</span>
+                {/* Consentimento Legal Obrigatório e Confirmação 18+ */}
+                <div className="space-y-3 pt-3 pb-1 border-t border-zinc-800/80 font-mono text-left">
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none group">
                     <input
-                      type="text"
+                      type="checkbox"
                       required
-                      maxLength={2}
-                      value={captchaAnswer}
+                      checked={ageConfirmed}
                       disabled={loading}
-                      onChange={(e) => setCaptchaAnswer(e.target.value)}
-                      placeholder="?"
-                      className="w-16 px-2 py-1.5 rounded border border-zinc-850 bg-black text-center text-xs font-bold font-mono text-yellow-500 focus:outline-none focus:border-yellow-500"
+                      onChange={(e) => setAgeConfirmed(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded border-zinc-700 bg-black text-yellow-500 focus:ring-0 cursor-pointer accent-yellow-500 shrink-0"
                     />
-                  </div>
+                    <span className="text-[11px] text-zinc-300 group-hover:text-amber-100 leading-tight">
+                      Declaro expressamente ter <strong className="text-yellow-400">18 anos de idade ou mais</strong> e plena capacidade civil.
+                    </span>
+                  </label>
+
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none group">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={termsAccepted}
+                      disabled={loading}
+                      onChange={(e) => setTermsAccepted(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded border-zinc-700 bg-black text-yellow-500 focus:ring-0 cursor-pointer accent-yellow-500 shrink-0"
+                    />
+                    <span className="text-[11px] text-zinc-300 group-hover:text-amber-100 leading-tight">
+                      Li e concordo com os{" "}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          openLegal("termos");
+                        }}
+                        className="text-yellow-400 underline hover:text-yellow-300 font-bold cursor-pointer"
+                      >
+                        Termos de Uso
+                      </button>{" "}
+                      (versão 1.0).
+                    </span>
+                  </label>
+
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none group">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={privacyAccepted}
+                      disabled={loading}
+                      onChange={(e) => setPrivacyAccepted(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded border-zinc-700 bg-black text-yellow-500 focus:ring-0 cursor-pointer accent-yellow-500 shrink-0"
+                    />
+                    <span className="text-[11px] text-zinc-300 group-hover:text-amber-100 leading-tight">
+                      Li e concordo com a{" "}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          openLegal("privacidade");
+                        }}
+                        className="text-yellow-400 underline hover:text-yellow-300 font-bold cursor-pointer"
+                      >
+                        Política de Privacidade & LGPD
+                      </button>{" "}
+                      (versão 1.0), autorizando o tratamento oracular dos meus dados.
+                    </span>
+                  </label>
                 </div>
 
                 <button
@@ -910,17 +962,50 @@ export default function PortalEntrance({ onLoginSuccess }: PortalEntranceProps) 
         </AnimatePresence>
 
         {/* Traditional Ethos Disclosure */}
-        <div className="mt-4 text-[10px] text-zinc-400 space-y-2 leading-relaxed max-w-sm px-4 bg-black/40 p-3 rounded-2xl backdrop-blur-md border border-zinc-900/60 uppercase font-mono tracking-wider">
+        <div className="mt-4 text-[10px] text-zinc-400 space-y-2.5 leading-relaxed max-w-sm px-4 bg-black/40 p-3.5 rounded-2xl backdrop-blur-md border border-zinc-900/60 uppercase font-mono tracking-wider text-center">
           <p className="text-zinc-500">
-            O oráculo de Exu oferece leituras simbólicas ancestrais voltadas ao autoconhecimento, à cultura afro-diaspórica e espiritualidade.
+            O oráculo de Exu oferece consultas e orientações ancestrais voltadas ao autoconhecimento, à tradição de terreiro e aos caminhos da vida.
           </p>
           <div className="flex justify-center gap-4 text-[9px] text-zinc-500">
             <span>🛡️ SEGURO</span>
             <span>✨ ANCESTRAL</span>
             <span>⚖️ EQUILIBRADO</span>
           </div>
+
+          {/* Legal Compliance and LGPD Links */}
+          <div className="pt-2 border-t border-zinc-800/80 flex flex-wrap justify-center gap-x-3 gap-y-1 text-[9px] font-mono text-zinc-400">
+            <button
+              type="button"
+              onClick={() => openLegal("termos")}
+              className="hover:text-yellow-400 underline cursor-pointer transition"
+            >
+              Termos de Uso
+            </button>
+            <span className="text-zinc-600">•</span>
+            <button
+              type="button"
+              onClick={() => openLegal("privacidade")}
+              className="hover:text-yellow-400 underline cursor-pointer transition"
+            >
+              Privacidade & LGPD
+            </button>
+            <span className="text-zinc-600">•</span>
+            <button
+              type="button"
+              onClick={() => openLegal("responsabilidade")}
+              className="hover:text-yellow-400 underline cursor-pointer transition"
+            >
+              Responsabilidade
+            </button>
+          </div>
         </div>
 
+        {/* Global Legal Modal */}
+        <LegalModal
+          isOpen={legalModalOpen}
+          initialTab={legalModalTab}
+          onClose={() => setLegalModalOpen(false)}
+        />
       </div>
     </div>
   );
