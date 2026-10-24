@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { auth, onAuthStateChanged, signOut } from "./firebase";
 import { 
-  Sparkles, Compass, LogIn, LogOut, Flame, Volume2, VolumeX, Send, 
+  Sparkles, LogIn, LogOut, Flame, Volume2, VolumeX, Send,
   BookOpen, User, Coins, Award, ShieldCheck, Terminal, HelpCircle, 
   RotateCcw, Trash2, Bookmark, Star, ChevronDown, CheckCircle
 } from "lucide-react";
@@ -17,7 +17,6 @@ import { parseApiResponse, apiFetch, generateIdempotencyKey } from "./api";
 
 // Import custom built components
 import PortalEntrance from "./components/PortalEntrance";
-import Oraculos from "./components/Oraculos";
 import UserProfilePanel from "./components/UserProfile";
 import PremiumCredits from "./components/PremiumCredits";
 import AdminPanel from "./components/AdminPanel";
@@ -74,7 +73,7 @@ const SESSION_KEY = "exu_responde_chat_session";
  
   // Modal controllers
   const [showEntranceModal, setShowEntranceModal] = useState(true);
-  const [activeModal, setActiveModal] = useState<"profile" | "oracles" | "library" | "credits" | "admin" | null>(null);
+  const [activeModal, setActiveModal] = useState<"profile" | "library" | "credits" | "admin" | null>(null);
   const [showSupportModal, setShowSupportModal] = useState(false);
   const [legalModalOpen, setLegalModalOpen] = useState(false);
   const [legalModalTab, setLegalModalTab] = useState<LegalTab>("termos");
@@ -921,18 +920,6 @@ const SESSION_KEY = "exu_responde_chat_session";
                 type="button"
                 onClick={() => {
                   AudioEngine.playCrystalBell();
-                  setActiveModal("oracles");
-                }}
-                className="w-full sm:flex-1 px-1.5 py-2.5 rounded-xl bg-zinc-950 hover:bg-red-950/20 border border-zinc-900 hover:border-yellow-500/20 text-[10px] sm:text-xs font-mono font-bold text-yellow-500 inline-flex items-center justify-center gap-1 sm:gap-1.5 cursor-pointer transition-all"
-              >
-                <Compass className="w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0" />
-                <span className="truncate">ORÁCULOS</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  AudioEngine.playCrystalBell();
                   setActiveModal("profile");
                 }}
                 className="w-full sm:flex-1 px-1.5 py-2.5 rounded-xl bg-zinc-950 hover:bg-red-950/20 border border-zinc-900 hover:border-yellow-500/20 text-[10px] sm:text-xs font-mono font-bold text-zinc-300 inline-flex items-center justify-center gap-1 sm:gap-1.5 cursor-pointer transition-all"
@@ -1144,43 +1131,6 @@ const SESSION_KEY = "exu_responde_chat_session";
                 <UserProfilePanel 
                   user={user}
                   onUpdateUser={syncUpdatedUser}
-                />
-              </div>
-            </div>
-          </motion.div>
-        )}
-
-        {/* ORACLES MODAL DRAWER */}
-        {activeModal === "oracles" && user && (
-          <motion.div
-            key="oracles_drawer"
-            initial={{ y: "100%" }}
-            animate={{ y: 0 }}
-            exit={{ y: "100%" }}
-            transition={{ type: "spring", damping: 25, stiffness: 180 }}
-            className="fixed inset-x-0 bottom-0 top-14 bg-zinc-950 border-t border-yellow-500/20 z-40 flex flex-col shadow-[0_-20px_50px_rgba(0,0,0,0.98)]"
-          >
-            {/* Header */}
-            <div className="px-4 sm:px-6 py-3 sm:py-4 bg-zinc-900 border-b border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 select-none">
-              <div className="flex items-center gap-2">
-                <Compass className="w-4 h-4 sm:w-5 sm:h-5 text-yellow-500" />
-                <h2 className="text-xs sm:text-sm font-black font-mono uppercase tracking-[0.1em] sm:tracking-[0.2em] text-yellow-500 truncate max-w-[240px] sm:max-w-none">SABEDORIA ORACULAR (TARÔ E ODUS)</h2>
-              </div>
-              <button
-                onClick={() => setActiveModal(null)}
-                className="w-full sm:w-auto px-4 py-2.5 sm:py-2 border border-zinc-800 rounded-lg hover:border-zinc-500 text-[10.5px] sm:text-xs font-mono font-bold transition-all cursor-pointer text-center bg-black/40 hover:bg-zinc-900"
-              >
-                ✕ VOLTAR AO ORÁCULO
-              </button>
-            </div>
-
-            {/* Scrollable container */}
-            <div className="flex-1 overflow-y-auto p-6 sm:p-8 scrolling-pane">
-              <div className="max-w-6xl mx-auto">
-                <Oraculos 
-                  user={user}
-                  onUpdateUser={syncUpdatedUser}
-                  openCreditsMenu={() => setActiveModal("credits")}
                 />
               </div>
             </div>
