@@ -19,7 +19,7 @@ interface OraculosProps {
 
 type ActiveOracleTab = "tarot" | "buzios" | "numerology" | "astrology";
 
-type PaidOracle = Exclude<ActiveOracleTab, "astrology">;
+type PaidOracle = ActiveOracleTab;
 interface PendingOracle {
   version: 1;
   key: string;
@@ -29,7 +29,7 @@ interface PendingOracle {
   payload: Record<string, string | number>;
 }
 const ORACLE_PATHS: Record<PaidOracle, string> = {
-  tarot: "/api/oraculo/tarot", buzios: "/api/oraculo/buzios", numerology: "/api/oraculo/numerologia",
+  tarot: "/api/oraculo/tarot", buzios: "/api/oraculo/buzios", numerology: "/api/oraculo/numerologia", astrology: "/api/oraculo/astrologia",
 };
 
 export default function Oraculos(props: OraculosProps) {
@@ -40,6 +40,7 @@ export default function Oraculos(props: OraculosProps) {
 
 function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosProps & { uid: string; key?: string }) {
   const [activeTab, setActiveTab] = useState<ActiveOracleTab>("tarot");
+  const ORACLE_COST_AXE = 5;
 
   // --- TAROT ORACLE STATE ---
   const [tarotOption, setTarotOption] = useState<1 | 3>(1);
@@ -93,14 +94,15 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
       if (!raw) return { pending: null as PendingOracle | null, error: "" };
       const item = JSON.parse(raw) as PendingOracle;
       if (item.version !== 1 || item.uid !== uid || item.userId !== user.id ||
-          !["tarot", "buzios", "numerology"].includes(item.kind) ||
+          !["tarot", "buzios", "numerology", "astrology"].includes(item.kind) ||
           typeof item.key !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(item.key) ||
           !item.payload || typeof item.payload !== "object" || Array.isArray(item.payload)) {
         throw new Error("Registro inválido");
       }
       if ((item.kind === "tarot" && (typeof item.payload.question !== "string" || ![1, 3].includes(Number(item.payload.slotsCount)))) ||
           (item.kind === "buzios" && typeof item.payload.question !== "string") ||
-          (item.kind === "numerology" && (typeof item.payload.birthName !== "string" || typeof item.payload.birthDate !== "string"))) {
+          (item.kind === "numerology" && (typeof item.payload.birthName !== "string" || typeof item.payload.birthDate !== "string")) ||
+          (item.kind === "astrology" && typeof item.payload.birthDate !== "string")) {
         throw new Error("Consulta inválida");
       }
       return { pending: item, error: "" };
@@ -224,9 +226,12 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
       if (!cast?.odu || !Array.isArray(cast.conchas) || !cast.conchas.every((shell: any) => shell && typeof shell === "object") ||
           typeof data.interpretation !== "string" || !data.interpretation.trim()) throw new Error("Resposta incompleta.");
       setBuziosResult({ ...cast, interpretation: data.interpretation, creditsLeft: data.creditsLeft, xpAwarded: data.alreadyProcessed ? 0 : (data.xpAwarded ?? 0) });
-    } else {
+    } else if (item.kind === "numerology") {
       if (!data.details || typeof data.details.analysis !== "string" || !data.details.analysis.trim()) throw new Error("Resposta incompleta.");
       setNumResult(data.details);
+    } else {
+      if (!data.details || typeof data.details.analysis !== "string" || !data.details.analysis.trim()) throw new Error("Resposta incompleta.");
+      setAstrologyResult(data.details);
     }
     setActiveTab(item.kind);
     sound("done");
@@ -248,7 +253,7 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
     setNotice("");
     setBuziosError(""); setNumError("");
     const item: PendingOracle = existing || { version: 1, key: generateIdempotencyKey(), userId: userRef.current.id, uid, kind, payload: { ...payload } };
-    const setLoading = item.kind === "tarot" ? setTarotLoading : item.kind === "buzios" ? setBuziosLoading : setNumLoading;
+    const setLoading = item.kind === "tarot" ? setTarotLoading : item.kind === "buzios" ? setBuziosLoading : item.kind === "numerology" ? setNumLoading : setAstrologyLoading;
     setLoading(true);
     let sent = false;
     try {
@@ -286,11 +291,11 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
     }
   }
 
-  const triggerBuziosLocal = () => runPaid("buzios", { question: buziosQuestion }, 3);
-  const drawTarotCards = () => runPaid("tarot", { question: tarotQuestion, slotsCount: tarotOption }, tarotOption === 3 ? 3 : 2);
+  const triggerBuziosLocal = () => runPaid("buzios", { question: buziosQuestion }, ORACLE_COST_AXE);
+  const drawTarotCards = () => runPaid("tarot", { question: tarotQuestion, slotsCount: tarotOption }, ORACLE_COST_AXE);
   const calculateNumerologyReport = () => {
     if (!numBirthDate) { setNumError("Por favor, preencha sua data de nascimento."); return; }
-    return runPaid("numerology", { birthName: numName, birthDate: numBirthDate }, 2);
+    return runPaid("numerology", { birthName: numName, birthDate: numBirthDate }, ORACLE_COST_AXE);
   };
   const recoverPending = () => {
     const item = pendingRef.current;
@@ -305,25 +310,12 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
     } finally { busyRef.current = false; if (currentAccount()) setBusy(false); }
   };
 
-  // Astrologia é gratuita na API atual; não soma XP nem altera saldo localmente.
-  const triggerAstrologyLocal = async () => {
-    if (busyRef.current) return;
+  // Mesma protecao de cobranca, recuperacao e idempotencia dos demais oraculos.
+  const triggerAstrologyLocal = () => {
     const targetDate = astrologyBirthDate || userRef.current.birthDate;
     if (!targetDate) { setAstrologyError("Por favor, selecione sua data de nascimento."); return; }
-    busyRef.current = true; setBusy(true); setAstrologyLoading(true); setAstrologyError("");
-    try {
-      const { response, data } = await requestJson("/api/oraculo/astrologia", { birthDate: targetDate });
-      if (!currentAccount()) return;
-      if (!response.ok || !data.details) throw new Error(data.error || "Não foi possível abrir o mapa astral.");
-      setAstrologyResult(data.details); sound("done");
-    } catch (error: any) {
-      if (currentAccount()) setAstrologyError(error.message || "Tente novamente em instantes.");
-    } finally {
-      busyRef.current = false;
-      if (currentAccount()) { setBusy(false); setAstrologyLoading(false); }
-    }
+    return runPaid("astrology", { birthDate: targetDate }, ORACLE_COST_AXE);
   };
-
   return (
 
     
@@ -377,7 +369,7 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
             <span className="text-sm">🐚</span>
             <div className="text-xs">
               <p className="font-bold tracking-wider">JOGO DE BÚZIOS</p>
-              <span className="text-[10px] text-zinc-500 font-mono">16 Conchas de Ifá • 3 Axé</span>
+              <span className="text-[10px] text-zinc-500 font-mono">16 Conchas de Ifá • 5 Axé</span>
             </div>
           </button>
 
@@ -409,7 +401,7 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
             <span className="text-sm">🪐</span>
             <div className="text-xs">
               <p className="font-bold tracking-wider">ASTROLOGIA ANCESTRAL</p>
-              <span className="text-[10px] text-zinc-500 font-mono">Signo & Elemento • Gratuito</span>
+              <span className="text-[10px] text-zinc-500 font-mono">Signo & Elemento • 5 Axé</span>
             </div>
           </button>
         </div>
@@ -475,7 +467,7 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
                           : "bg-black border-red-950/50 text-zinc-500 hover:text-zinc-300"
                       }`}
                     >
-                      1 CARTA (Conselho Rápido • 2 Axé)
+                      1 CARTA (Conselho Rápido • 5 Axé)
                     </button>
                     <button
                       type="button"
@@ -487,7 +479,7 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
                           : "bg-black border-red-950/50 text-zinc-500 hover:text-zinc-300"
                       }`}
                     >
-                      3 CARTAS (Passado/Pres/Fut • 3 Axé)
+                      3 CARTAS (Passado/Pres/Fut • 5 Axé)
                     </button>
                   </div>
                 </div>
@@ -629,7 +621,7 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
                 {/* Throw Button */}
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
                   <span className="text-xs font-mono text-yellow-500/80">
-                    Custo do lançamento: <strong className="text-yellow-400 font-bold">3 Créditos Axé</strong>
+                    Custo do lançamento: <strong className="text-yellow-400 font-bold">5 Créditos Axé</strong>
                   </span>
 
                   <button
@@ -806,7 +798,7 @@ function OracleSession({ user, onUpdateUser, openCreditsMenu, uid }: OraculosPro
                   ) : (
                     <>
                       <Sparkles className="w-4 h-4 text-black" />
-                      <span>GERAR MAPA CABALÍSTICO (2 Axé)</span>
+                      <span>GERAR MAPA CABALÍSTICO (5 Axé)</span>
                     </>
                   )}
                 </button>
@@ -883,7 +875,7 @@ Energia do ano atual
               <div className="flex items-center justify-between border-b border-red-950/50 pb-4">
                 <div>
                   <h2 className="text-lg font-bold tracking-widest text-yellow-400 uppercase">Astrologia dos Orixás Ancestrais</h2>
-                  <p className="text-xs text-zinc-500">Sincronize a órbita de sua vida com o seu elemento natural protetor - sem custo de Axé</p>
+                  <p className="text-xs text-zinc-500">Sincronize a órbita de sua vida com o seu elemento natural protetor - custo de 5 créditos Axé</p>
                 </div>
                 <span className="text-2xl font-mono text-yellow-500">🪐</span>
               </div>
@@ -907,7 +899,7 @@ Energia do ano atual
                   <button
                     id="calc_astrology_action"
                     onClick={triggerAstrologyLocal}
-                    disabled={busy || !uid}
+                    disabled={paidDisabled}
                     className="px-6 py-2.5 bg-zinc-900 hover:bg-zinc-800 border border-yellow-500/30 text-yellow-400 font-bold tracking-widest text-xs rounded-xl transition-all cursor-pointer"
                   >
                     {astrologyLoading ? "CALCULANDO ESTRELAS ACOPLADAS..." : "MAPEAR ELEMENTO CÓSMICO"}

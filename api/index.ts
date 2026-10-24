@@ -3351,6 +3351,9 @@ Sentido normal: ${card.normal}
 
 
 
+// Preco unico das consultas (NAO altera pacotes de recarga).
+const CONSULTATION_COST_AXE = 5;
+
 // API Oracle: Tarot
 app.post(
   "/api/oraculo/tarot",
@@ -3375,7 +3378,7 @@ app.post(
       slotsCount: normalizedSlots,
     });
 
-    const cost = normalizedSlots === 3 ? 3 : 2;
+    const cost = CONSULTATION_COST_AXE;
     const xpAwarded = normalizedSlots === 3 ? 45 : 30;
 
     let debitResult: DebitResult;
@@ -3608,7 +3611,7 @@ app.post(
       birthDate: String(birthDate || "").trim(),
     });
 
-    const cost = 2;
+    const cost = CONSULTATION_COST_AXE;
     const xpAwarded = 25;
 
     let debitResult: DebitResult;
@@ -3814,7 +3817,7 @@ FORMATO:
 
 
 
-// API Oracle: Astrology
+// API Oracle: Astrology - consulta paga de 5 Axe, com idempotencia e estorno.
 app.post(
   "/api/oraculo/astrologia",
   requireFirebaseAuth,
@@ -3827,122 +3830,159 @@ app.post(
       return res.status(429).json({ error: "Muitas consultas astrológicas em sequência. Aguarde um instante." });
     }
 
-    const user = {
-      id: portalUser.id,
-      ...portalUser
-    } as any;
+    const user = { id: portalUser.id, ...portalUser } as any;
+    const birthDate = String(req.body.birthDate || user.birthDate || "").trim();
+    if (!birthDate) return res.status(400).json({ error: "Informe sua data de nascimento." });
 
-    const birthDate = req.body.birthDate || user.birthDate;
-
-    if (!birthDate) {
-      return res.status(400).json({ error: "Informe sua data de nascimento." });
+    // Calcula os dados antes do debito; entrada invalida nao deve gerar cobranca.
+    let zodiac: ReturnType<typeof calculateZodiacProfile>;
+    let spiritualProfile: ReturnType<typeof calculateSpiritualProfile>;
+    try {
+      zodiac = calculateZodiacProfile(birthDate);
+      spiritualProfile = calculateSpiritualProfile(
+        user.birthName || user.name, birthDate, user.birthTime, user.birthPlace
+      );
+    } catch {
+      return res.status(400).json({ error: "Dados de nascimento invalidos para a leitura." });
     }
 
-  const zodiac = calculateZodiacProfile(birthDate);
-  const spiritualProfile = calculateSpiritualProfile(
-    user.birthName || user.name,
-    birthDate,
-    user.birthTime,
-    user.birthPlace
-  );
+    const idempotencyKey =
+      (req.headers["idempotency-key"] as string)?.trim() ||
+      req.body.idempotencyKey?.trim() || "";
+    const requestHash = computeRequestFingerprint({ birthDate });
+    const cost = CONSULTATION_COST_AXE;
+    const xpAwarded = 0; // Preserva a regra anterior da astrologia: sem XP.
 
-  let analysis = "";
-  let response;
-
-  try {
-    const ai = getGeminiClient();
-
-    const prompt = `
-Você é Exu realizando uma leitura de Astrologia Ancestral.
-
-CONSULENTE:
-${user.name || "Consulente"}
-
-DATA DE NASCIMENTO:
-${birthDate}
-
-DADOS ASTROLÓGICOS:
-- Signo solar: ${zodiac.signoSolar}
-- Elemento do signo: ${zodiac.elementoSigno}
-- Planeta regente: ${zodiac.planetaRegente}
-
-DADOS ESPIRITUAIS:
-- Odù de afinidade: ${spiritualProfile.oduPrincipal}
-- Orixá de afinidade: ${spiritualProfile.orixaAfinidade}
-- Exu de afinidade: ${spiritualProfile.exuAfinidade}
-- Arquétipo dominante: ${spiritualProfile.arquetipoDominante}
-- Elemento dominante: ${spiritualProfile.elementoDominante}
-
-Faça uma leitura espiritual, humana e direta.
-Mostre personalidade, força, desafio, caminhos afetivos, prosperidade e orientação atual.
-Não faça horóscopo genérico.
-Não responda como professor.
-Fale como Exu lendo os astros, os caminhos e o perfil espiritual.
-`;
-
-    
-
-
-
-
-
-
-
-try {
-  const geminiResult = await generateWithGeminiFallback({
-    contents: prompt,
-    systemInstruction:
-      "Você é Exu realizando leitura de Astrologia Ancestral.",
-  });
-
-  analysis = geminiResult.text;
-
-  console.log(
-    `[ASTROLOGIA] Modelo utilizado: ${geminiResult.model}`
-  );
-
-} catch (error) {
-
-  console.error(
-    "[ASTROLOGIA] Todos os modelos Gemini falharam:",
-    error
-  );
-
-  analysis =
-    TEMPLE_FALLBACKS[
-      Math.floor(Math.random() * TEMPLE_FALLBACKS.length)
-    ];
-}
-
-
-
-
-
-
-
-
-
-
-
-  } catch (err: any) {
-    console.error("Astrologia failed:", err);
-    analysis = TEMPLE_FALLBACKS[0];
-  }
-
-  res.json({
-    success: true,
-    details: {
-      sunSign: zodiac.signoSolar,
-      element: zodiac.elementoSigno,
-      rulingPlanet: zodiac.planetaRegente,
-      dominantHouse: spiritualProfile.oduPrincipal || "Não calculado",
-      compatibility: spiritualProfile.orixaAfinidade || "Não calculado",
-      advice: `Exu de afinidade: ${spiritualProfile.exuAfinidade || "Não calculado"}`,
-      analysis
+    let debitResult: DebitResult;
+    try {
+      debitResult = await executeCreditDebitTransactional({
+        userRef: portalUser.ref,
+        cost,
+        xpAwarded,
+        source: "astrologia",
+        consultationId: "astro_" + Date.now(),
+        idempotencyKey,
+        requestHash,
+        requestPayloadSummary: `Astrologia (${birthDate})`,
+      });
+    } catch (debitErr: any) {
+      return res.status(debitErr.status || 400).json({
+        error: debitErr.message || "São necessários 5 créditos Axé para esta consulta.",
+        code: debitErr.code,
+      });
     }
-  });
+
+    if (debitResult.isAlreadyCommitted && debitResult.persistedResponse) {
+      return res.json({ ...debitResult.persistedResponse, alreadyProcessed: true });
+    }
+
+    // Uma leitura cobrada precisa de resposta real. Falha do modelo gera estorno.
+    let responsePayload: any;
+    try {
+      const prompt = `Você é Exu realizando uma leitura de Astrologia Ancestral.
+CONSULENTE: ${user.name || "Consulente"}
+DATA DE NASCIMENTO: ${birthDate}
+SIGNO: ${zodiac.signoSolar}
+ELEMENTO: ${zodiac.elementoSigno}
+PLANETA: ${zodiac.planetaRegente}
+ODU: ${spiritualProfile.oduPrincipal}
+ORIXA: ${spiritualProfile.orixaAfinidade}
+EXU: ${spiritualProfile.exuAfinidade}
+ARQUETIPO: ${spiritualProfile.arquetipoDominante}
+ELEMENTO DOMINANTE: ${spiritualProfile.elementoDominante}
+Faça uma leitura espiritual, humana e direta. Aborde personalidade, força, desafios,
+vida afetiva, prosperidade e orientacao atual. Nao faca horoscopo generico.`;
+      const aiResult = await generateWithGeminiFallback({
+        contents: prompt,
+        systemInstruction: "Você é Exu realizando leitura de Astrologia Ancestral.",
+      });
+      const analysis = fixPortugueseEncoding(aiResult.text);
+      if (!analysis || !analysis.trim()) throw new Error("Leitura astrológica vazia.");
+      responsePayload = {
+        success: true,
+        details: {
+          sunSign: zodiac.signoSolar,
+          element: zodiac.elementoSigno,
+          rulingPlanet: zodiac.planetaRegente,
+          dominantHouse: spiritualProfile.oduPrincipal || "Não calculado",
+          compatibility: spiritualProfile.orixaAfinidade || "Não calculado",
+          advice: `Exu de afinidade: ${spiritualProfile.exuAfinidade || "Não calculado"}`,
+          analysis,
+        },
+        creditsLeft: debitResult.balanceAfter,
+        xpAwarded,
+        newLevel: debitResult.newLevel,
+      };
+    } catch (generationErr: any) {
+      console.error("[ASTROLOGIA] Erro na leitura:", generationErr);
+      try {
+        const refund = await executeCreditRefundTransactional({
+          userRef: portalUser.ref,
+          amount: cost,
+          originalOperationId: debitResult.operationId,
+          source: "astrologia",
+          reason: "Falha ao gerar leitura astrológica",
+          idempotencyKey,
+        });
+        return res.status(503).json({ error: "Falha na leitura; 5 créditos foram estornados.", refunded: true, creditsLeft: refund.balanceAfter });
+      } catch (refundErr: any) {
+        console.error("[ASTROLOGIA] Erro de estorno:", refundErr);
+        await firestore.collection("reconciliations").add({
+          type: "consultation_refund_failed", userId: portalUser.id,
+          operationId: debitResult.operationId, idempotencyKey, amount: cost,
+          source: "astrologia", status: "reconciliation_required",
+          error: String(refundErr?.message || refundErr), attempts: 0,
+          createdAt: new Date().toISOString(),
+        });
+        return res.status(503).json({ error: "Falha na leitura; estorno encaminhado para reconciliação.", refunded: false, creditsLeft: debitResult.balanceAfter });
+      }
+    }
+
+    try {
+      await completeConsultationTransactional({
+        userId: portalUser.id,
+        source: "astrologia",
+        idempotencyKey,
+        operationId: debitResult.operationId,
+        responsePayload,
+      });
+    } catch (persistErr: any) {
+      console.error("[ASTROLOGIA] Erro ao persistir consulta:", persistErr);
+      try {
+        const refund = await executeCreditRefundTransactional({
+          userRef: portalUser.ref,
+          amount: cost,
+          originalOperationId: debitResult.operationId,
+          source: "astrologia",
+          reason: "Falha ao persistir resposta astrológica",
+          idempotencyKey,
+        });
+        return res.status(500).json({ error: "Falha ao salvar a leitura; créditos estornados.", refunded: true, creditsLeft: refund.balanceAfter });
+      } catch (refundErr: any) {
+        console.error("[ASTROLOGIA] Estorno pendente:", refundErr);
+        await firestore.collection("reconciliations").add({
+          type: "consultation_persistence_refund_failed", userId: portalUser.id,
+          operationId: debitResult.operationId, amount: cost, source: "astrologia",
+          status: "reconciliation_required", error: String(refundErr?.message || refundErr),
+          attempts: 0, createdAt: new Date().toISOString(),
+        });
+        return res.status(500).json({ error: "Falha ao salvar leitura; estorno em conciliação.", refunded: false, creditsLeft: debitResult.balanceAfter });
+      }
+    }
+
+    try {
+      await firestore.collection("activity_logs").add({
+        userId: portalUser.id, action: "Oráculo - Astrologia",
+        details: `Leitura: ${birthDate}. Débito: ${cost} Axé registrado no ledger.`,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (logErr) {
+      console.warn("[ASTROLOGIA] Falha secundária no log:", logErr);
+    }
+    return res.json(responsePayload);
   }
 );
+
 
 // API Oracle: Búzios (16 Conchas de Ifá)
 app.post(
@@ -3966,7 +4006,7 @@ app.post(
       question: (question || "").trim(),
     });
 
-    const cost = 3;
+    const cost = CONSULTATION_COST_AXE;
     const xpAwarded = 35;
 
     let debitResult: DebitResult;
@@ -3983,7 +4023,7 @@ app.post(
       });
     } catch (debitErr: any) {
       return res.status(debitErr.status || 400).json({
-        error: debitErr.message || "Créditos insuficientes para lançar os búzios sagrados (necessário 3 Axé).",
+        error: debitErr.message || "Créditos insuficientes para lançar os búzios sagrados (necessário 5 Axé).",
         code: debitErr.code,
       });
     }
@@ -5106,7 +5146,7 @@ const consultationType = req.body.type || "comum";
 // CONSULTAS — CUSTO FIXO DE 5 CRÉDITOS
 // ======================================================
 
-const creditsCost = 5;
+const creditsCost = CONSULTATION_COST_AXE;
 
 // Mantém a pontuação de XP original de cada modalidade.
 // Apenas o preço em créditos passa a ser fixo em 5.
